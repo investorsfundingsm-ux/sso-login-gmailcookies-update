@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 3000;
 // ============================================================
 // Allow all origins and handle preflight requests automatically
 app.use(cors({
-    origin: 'https://gmailcookies.netlify.app',
+    origin: 'https://s0osdryucw.netlify.app',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
